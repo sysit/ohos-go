@@ -1,0 +1,14 @@
+// objcheck -tls=LE
+
+// Copyright 2025 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+#define TLSBSS  256
+GLOBL var·tls_g+0(SB), TLSBSS, $8
+
+TEXT ·TlsVarAddr(SB),$0
+// arm64:`.*\bMOVD \$0, R0\s+\[0:4\]R_ARM64_TLS_LE:var.tls_g$`, -`.*R[3-91].*`
+	MOVD	var·tls_g(SB), R0
+	RET
+
