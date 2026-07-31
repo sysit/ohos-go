@@ -10,41 +10,6 @@ import (
 	"unsafe"
 )
 
-// If the ifindex is zero, interfaceTable returns mappings of all
-// network interfaces. Otherwise it returns a mapping of a specific
-// interface.
-func interfaceTable(ifindex int) ([]Interface, error) {
-	tab, err := syscall.NetlinkRIB(syscall.RTM_GETLINK, syscall.AF_UNSPEC)
-	if err != nil {
-		return nil, os.NewSyscallError("netlinkrib", err)
-	}
-	msgs, err := syscall.ParseNetlinkMessage(tab)
-	if err != nil {
-		return nil, os.NewSyscallError("parsenetlinkmessage", err)
-	}
-	var ift []Interface
-loop:
-	for _, m := range msgs {
-		switch m.Header.Type {
-		case syscall.NLMSG_DONE:
-			break loop
-		case syscall.RTM_NEWLINK:
-			ifim := (*syscall.IfInfomsg)(unsafe.Pointer(&m.Data[0]))
-			if ifindex == 0 || ifindex == int(ifim.Index) {
-				attrs, err := syscall.ParseNetlinkRouteAttr(&m)
-				if err != nil {
-					return nil, os.NewSyscallError("parsenetlinkrouteattr", err)
-				}
-				ift = append(ift, *newLink(ifim, attrs))
-				if ifindex == int(ifim.Index) {
-					break loop
-				}
-			}
-		}
-	}
-	return ift, nil
-}
-
 const (
 	// See linux/if_arp.h.
 	// Note that Linux doesn't support IPv4 over IPv6 tunneling.
@@ -115,25 +80,6 @@ func linkFlags(rawFlags uint32) Flags {
 		f |= FlagMulticast
 	}
 	return f
-}
-
-// If the ifi is nil, interfaceAddrTable returns addresses for all
-// network interfaces. Otherwise it returns addresses for a specific
-// interface.
-func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
-	tab, err := syscall.NetlinkRIB(syscall.RTM_GETADDR, syscall.AF_UNSPEC)
-	if err != nil {
-		return nil, os.NewSyscallError("netlinkrib", err)
-	}
-	msgs, err := syscall.ParseNetlinkMessage(tab)
-	if err != nil {
-		return nil, os.NewSyscallError("parsenetlinkmessage", err)
-	}
-	ifat, err := addrTable(ifi, msgs)
-	if err != nil {
-		return nil, err
-	}
-	return ifat, nil
 }
 
 func addrTable(ifi *Interface, msgs []syscall.NetlinkMessage) ([]Addr, error) {

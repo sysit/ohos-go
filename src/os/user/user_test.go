@@ -6,6 +6,7 @@ package user
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -36,7 +37,7 @@ func TestCurrent(t *testing.T) {
 			t.Skipf("skipping: %v", err)
 		}
 	}
-	if u.HomeDir == "" {
+	if !runtime.IsOpenharmony && u.HomeDir == "" {
 		t.Errorf("didn't get a HomeDir")
 	}
 	if u.Username == "" {

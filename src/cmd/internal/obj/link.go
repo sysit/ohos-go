@@ -1132,6 +1132,7 @@ type Link struct {
 	Retpoline          bool   // emit use of retpoline stubs for indirect jmp/call
 	Flag_maymorestack  string // If not "", call this function before stack checks
 	Bso                *bufio.Writer
+	Tls                string // If not "", specifies tls model to use: "LE", IE" or "GD"
 	Pathname           string
 	Pkgpath            string           // the current package's import path
 	hashmu             sync.Mutex       // protects hash, funchash

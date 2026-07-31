@@ -98,6 +98,7 @@ var okgoos = []string{
 	"freebsd",
 	"nacl", // keep;
 	"netbsd",
+	"openharmony",
 	"openbsd",
 	"plan9",
 	"windows",
@@ -330,8 +331,9 @@ func compilerEnv(envName, def string) map[string]string {
 // clangos lists the operating systems where we prefer clang to gcc.
 var clangos = []string{
 	"darwin", "ios", // macOS 10.9 and later require clang
-	"freebsd", // FreeBSD 10 and later do not ship gcc
-	"openbsd", // OpenBSD ships with GCC 4.2, which is now quite old.
+	"freebsd",     // FreeBSD 10 and later do not ship gcc
+	"openbsd",     // OpenBSD ships with GCC 4.2, which is now quite old.
+	"openharmony", // openharmony default CC is clang.
 }
 
 // compilerEnvLookup returns the compiler settings for goos/goarch in map m.
@@ -647,6 +649,8 @@ func mustLinkExternal(goos, goarch string, cgoEnabled bool) bool {
 			// It seems that on Dragonfly thread local storage is
 			// set up by the dynamic linker, so internal cgo linking
 			// doesn't work. Test case is "go test runtime/cgo".
+			return true
+		case "openharmony":
 			return true
 		}
 	}
@@ -1073,18 +1077,19 @@ func packagefile(pkg string) string {
 // unixOS is the set of GOOS values matched by the "unix" build tag.
 // This is the same list as in internal/syslist/syslist.go.
 var unixOS = map[string]bool{
-	"aix":       true,
-	"android":   true,
-	"darwin":    true,
-	"dragonfly": true,
-	"freebsd":   true,
-	"hurd":      true,
-	"illumos":   true,
-	"ios":       true,
-	"linux":     true,
-	"netbsd":    true,
-	"openbsd":   true,
-	"solaris":   true,
+	"aix":         true,
+	"android":     true,
+	"darwin":      true,
+	"dragonfly":   true,
+	"freebsd":     true,
+	"hurd":        true,
+	"illumos":     true,
+	"ios":         true,
+	"linux":       true,
+	"openharmony": true,
+	"netbsd":      true,
+	"openbsd":     true,
+	"solaris":     true,
 }
 
 // matchtag reports whether the tag matches this build.
@@ -1093,7 +1098,7 @@ func matchtag(tag string) bool {
 	case "gc", "cmd_go_bootstrap", "go1.1":
 		return true
 	case "linux":
-		return goos == "linux" || goos == "android"
+		return goos == "linux" || goos == "android" || goos == "openharmony"
 	case "solaris":
 		return goos == "solaris" || goos == "illumos"
 	case "darwin":
@@ -1766,57 +1771,59 @@ func checkNotStale(env []string, goBinary string, targets ...string) {
 // single point of truth for supported platforms. This list is used
 // by 'go tool dist list'.
 var cgoEnabled = map[string]bool{
-	"aix/ppc64":       true,
-	"darwin/amd64":    true,
-	"darwin/arm64":    true,
-	"dragonfly/amd64": true,
-	"freebsd/386":     true,
-	"freebsd/amd64":   true,
-	"freebsd/arm":     true,
-	"freebsd/arm64":   true,
-	"freebsd/riscv64": true,
-	"illumos/amd64":   true,
-	"linux/386":       true,
-	"linux/amd64":     true,
-	"linux/arm":       true,
-	"linux/arm64":     true,
-	"linux/loong64":   true,
-	"linux/ppc64":     false,
-	"linux/ppc64le":   true,
-	"linux/mips":      true,
-	"linux/mipsle":    true,
-	"linux/mips64":    true,
-	"linux/mips64le":  true,
-	"linux/riscv64":   true,
-	"linux/s390x":     true,
-	"linux/sparc64":   true,
-	"android/386":     true,
-	"android/amd64":   true,
-	"android/arm":     true,
-	"android/arm64":   true,
-	"ios/arm64":       true,
-	"ios/amd64":       true,
-	"js/wasm":         false,
-	"wasip1/wasm":     false,
-	"netbsd/386":      true,
-	"netbsd/amd64":    true,
-	"netbsd/arm":      true,
-	"netbsd/arm64":    true,
-	"openbsd/386":     true,
-	"openbsd/amd64":   true,
-	"openbsd/arm":     true,
-	"openbsd/arm64":   true,
-	"openbsd/mips64":  true,
-	"openbsd/ppc64":   false,
-	"openbsd/riscv64": true,
-	"plan9/386":       false,
-	"plan9/amd64":     false,
-	"plan9/arm":       false,
-	"solaris/amd64":   true,
-	"windows/386":     true,
-	"windows/amd64":   true,
-	"windows/arm":     false,
-	"windows/arm64":   true,
+	"aix/ppc64":         true,
+	"darwin/amd64":      true,
+	"darwin/arm64":      true,
+	"dragonfly/amd64":   true,
+	"freebsd/386":       true,
+	"freebsd/amd64":     true,
+	"freebsd/arm":       true,
+	"freebsd/arm64":     true,
+	"freebsd/riscv64":   true,
+	"illumos/amd64":     true,
+	"linux/386":         true,
+	"linux/amd64":       true,
+	"linux/arm":         true,
+	"linux/arm64":       true,
+	"linux/loong64":     true,
+	"linux/ppc64":       false,
+	"linux/ppc64le":     true,
+	"linux/mips":        true,
+	"linux/mipsle":      true,
+	"linux/mips64":      true,
+	"linux/mips64le":    true,
+	"linux/riscv64":     true,
+	"linux/s390x":       true,
+	"linux/sparc64":     true,
+	"android/386":       true,
+	"android/amd64":     true,
+	"android/arm":       true,
+	"android/arm64":     true,
+	"ios/arm64":         true,
+	"ios/amd64":         true,
+	"js/wasm":           false,
+	"wasip1/wasm":       false,
+	"netbsd/386":        true,
+	"netbsd/amd64":      true,
+	"netbsd/arm":        true,
+	"netbsd/arm64":      true,
+	"openharmony/amd64": true,
+	"openharmony/arm64": true,
+	"openbsd/386":       true,
+	"openbsd/amd64":     true,
+	"openbsd/arm":       true,
+	"openbsd/arm64":     true,
+	"openbsd/mips64":    true,
+	"openbsd/ppc64":     false,
+	"openbsd/riscv64":   true,
+	"plan9/386":         false,
+	"plan9/amd64":       false,
+	"plan9/arm":         false,
+	"solaris/amd64":     true,
+	"windows/386":       true,
+	"windows/amd64":     true,
+	"windows/arm":       false,
+	"windows/arm64":     true,
 }
 
 // List of platforms that are marked as broken ports.
@@ -1831,14 +1838,16 @@ var broken = map[string]bool{
 
 // List of platforms which are first class ports. See go.dev/issue/38874.
 var firstClass = map[string]bool{
-	"darwin/amd64":  true,
-	"darwin/arm64":  true,
-	"linux/386":     true,
-	"linux/amd64":   true,
-	"linux/arm":     true,
-	"linux/arm64":   true,
-	"windows/386":   true,
-	"windows/amd64": true,
+	"darwin/amd64":      true,
+	"darwin/arm64":      true,
+	"linux/386":         true,
+	"linux/amd64":       true,
+	"linux/arm":         true,
+	"linux/arm64":       true,
+	"windows/386":       true,
+	"windows/amd64":     true,
+	"openharmony/amd64": true,
+	"openharmony/arm64": true,
 }
 
 // We only need CC if cgo is forced on, or if the platform requires external linking.

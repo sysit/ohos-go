@@ -61,6 +61,19 @@ func main() {
 	case "all", "ret":
 		ctxt.Retpoline = true
 	}
+	switch *flags.Tls {
+	default:
+		log.Printf("unknown tls model requested: -tls=%s (expected GD, IE or LE)", *flags.Tls)
+		os.Exit(2)
+	case "":
+		// nothing
+	case "GD", "IE", "LE":
+		if GOARCH != "arm64" && GOARCH != "amd64" {
+			log.Printf("explicit tls mode; (-tls) is currently only supported for arm64 and amd64")
+			os.Exit(2)
+		}
+		ctxt.Tls = *flags.Tls
+	}
 
 	ctxt.Bso = bufio.NewWriter(os.Stdout)
 	defer ctxt.Bso.Flush()

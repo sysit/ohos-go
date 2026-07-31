@@ -185,6 +185,7 @@ func instrumentInit() {
 func buildModeInit() {
 	gccgo := cfg.BuildToolchainName == "gccgo"
 	var codegenArg string
+	var tlsModel string
 
 	// Configure the build mode first, then verify that it is supported.
 	// That way, if the flag is completely bogus we will prefer to error out with
@@ -205,11 +206,19 @@ func buildModeInit() {
 					codegenArg = "-shared"
 				}
 
-			case "dragonfly", "freebsd", "illumos", "linux", "netbsd", "openbsd", "solaris":
+			case "dragonfly", "freebsd", "illumos", "linux", "netbsd", "openbsd", "solaris", "openharmony":
 				// Use -shared so that the result is
 				// suitable for inclusion in a PIE or
 				// shared library.
 				codegenArg = "-shared"
+				switch cfg.Goarch {
+				case "arm64":
+					tlsModel = "GD"
+				case "amd64":
+					if cfg.Goos == "openharmony" {
+						tlsModel = "GD"
+					}
+				}
 			}
 		}
 		cfg.ExeSuffix = ".a"
@@ -220,8 +229,16 @@ func buildModeInit() {
 			codegenArg = "-fPIC"
 		} else {
 			switch cfg.Goos {
-			case "linux", "android", "freebsd":
+			case "linux", "android", "freebsd", "openharmony":
 				codegenArg = "-shared"
+				switch cfg.Goarch {
+				case "arm64":
+					tlsModel = "GD"
+				case "amd64":
+					if cfg.Goos == "openharmony" {
+						tlsModel = "GD"
+					}
+				}
 			case "windows":
 				// Do not add usual .exe suffix to the .dll file.
 				cfg.ExeSuffix = ""
@@ -316,6 +333,9 @@ func buildModeInit() {
 			}
 			cfg.BuildContext.InstallSuffix += codegenArg[1:]
 		}
+	}
+	if tlsModel != "" {
+		forcedAsmflags = append(forcedAsmflags, "-tls="+tlsModel, "-D=TLS_"+tlsModel)
 	}
 
 	switch cfg.BuildMod {

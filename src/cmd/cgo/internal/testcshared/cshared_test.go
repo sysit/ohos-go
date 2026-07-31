@@ -117,7 +117,7 @@ func testMain(m *testing.M) int {
 		if GOARCH == "arm64" {
 			libgodir += "_shared"
 		}
-	case "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "solaris", "illumos":
+	case "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "solaris", "illumos", "openharmony":
 		libgodir += "_shared"
 	}
 	cc = append(cc, "-I", filepath.Join("pkg", libgodir))
@@ -630,7 +630,7 @@ func TestSignalHandlersWithNotify(t *testing.T) {
 
 func TestPIE(t *testing.T) {
 	switch GOOS {
-	case "linux", "android":
+	case "linux", "android", "openharmony":
 		break
 	default:
 		t.Skipf("Skipping on %s", GOOS)

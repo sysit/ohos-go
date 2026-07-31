@@ -142,6 +142,14 @@ const (
 	// referenced (thread local) symbol from the GOT.
 	R_ARM64_TLS_IE
 
+	// Relocates an ADRP; LD64; ADD; BLR instruction sequence:
+	// - ADRP gets part of the address of the GOT entry for thread-local variable
+	// - LD64 loads the stub address from the GOT entry
+	// - ADD is part of address calculation for the GOT entry to pass as argument
+	// - BLR calls the stub passing the calculated address.
+	// The stub returns the variable offset from the thread pointer in R0.
+	R_ARM64_TLS_GD
+
 	// R_ARM64_GOTPCREL relocates an adrp, ld64 pair to compute the address of the GOT
 	// slot of the referenced symbol.
 	R_ARM64_GOTPCREL
@@ -391,6 +399,18 @@ const (
 	// This relocation does not apply any changes to the actual data, it is
 	// just used in the linker to order the inittask records appropriately.
 	R_INITORDER
+
+	// R_AMD64_TLS_GD (amd64 only) relocates the 32-bit displacement of a
+	// "lea runtime.tlsg@tlsdesc(%rip), %rax" instruction that is immediately
+	// followed by a 2-byte "call *(%rax)". When linking externally it is
+	// turned into the ELF relocation pair R_X86_64_GOTPC32_TLSDESC (on the
+	// lea) and R_X86_64_TLSDESC_CALL (on the call), implementing the TLS
+	// descriptor (general dynamic) access model. The descriptor call returns
+	// the offset of the variable from the thread pointer in AX and preserves
+	// all other registers. Used on openharmony/amd64 for buildmodes that
+	// produce dlopen'ed libraries, because the musl loader rejects
+	// initial-exec TLS relocations there.
+	R_AMD64_TLS_GD
 
 	// R_WEAK marks the relocation as a weak reference.
 	// A weak relocation does not make the symbol it refers to reachable,

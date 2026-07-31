@@ -22,6 +22,10 @@ func TestSetgidStress(t *testing.T) {
 	if runtime.GOOS == "android" {
 		t.Skip("unsupported on Android")
 	}
+	// openharmony use musl libc and fixed in go1.23
+	if runtime.IsOpenharmony {
+		t.Skip("setgid is broken with musl libc - go.dev/issue/39857")
+	}
 	testSetgidStress(t)
 }
 

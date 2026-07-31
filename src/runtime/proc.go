@@ -769,6 +769,20 @@ func getGodebugEarly() string {
 		// Similar to goenv_unix but extracts the environment value for
 		// GODEBUG directly.
 		// TODO(moehrmann): remove when general goenvs() can be called before cpuinit()
+
+		// If the binary is an archive or a library, the operating system is Linux,
+		// and the system uses Musl, then read the environment variables from the
+		// /proc/self/environ file. Iterate over each null-terminated string read
+		// from the file. If any string has the specified prefix, return that string.
+		if libmusl {
+			for _, value := range readNullTerminatedStringsFromFile(procEnviron) {
+				if stringslite.HasPrefix(value, prefix) {
+					return value
+				}
+			}
+			return env
+		}
+
 		n := int32(0)
 		for argv_index(argv, argc+1+n) != nil {
 			n++
@@ -1016,6 +1030,28 @@ func (mp *m) becomeSpinning() {
 	mp.spinning = true
 	sched.nmspinning.Add(1)
 	sched.needspinning.Store(0)
+}
+
+// Take a snapshot of allp, for use after dropping the P.
+//
+// Must be called with a P, but the returned slice may be used after dropping
+// the P. The M holds a reference on the snapshot to keep the backing array
+// alive.
+//
+//go:yeswritebarrierrec
+func (mp *m) snapshotAllp() []*p {
+	mp.allpSnapshot = allp
+	return mp.allpSnapshot
+}
+
+// Clear the saved allp snapshot. Should be called as soon as the snapshot is
+// no longer required.
+//
+// Must be called after reacquiring a P, as it requires a write barrier.
+//
+//go:yeswritebarrierrec
+func (mp *m) clearAllpSnapshot() {
+	mp.allpSnapshot = nil
 }
 
 func (mp *m) hasCgoOnStack() bool {
@@ -3297,6 +3333,11 @@ func findRunnable() (gp *g, inheritTime, tryWakeP bool) {
 	// an M.
 
 top:
+	// We may have collected an allp snapshot below. The snapshot is only
+	// required in each loop iteration. Clear it to all GC to collect the
+	// slice.
+	mp.clearAllpSnapshot()
+
 	pp := mp.p.ptr()
 	if sched.gcwaiting.Load() {
 		gcstopm()
@@ -3465,7 +3506,11 @@ top:
 	// which can change underfoot once we no longer block
 	// safe-points. We don't need to snapshot the contents because
 	// everything up to cap(allp) is immutable.
-	allpSnapshot := allp
+	//
+	// We clear the snapshot from the M after return via
+	// mp.clearAllpSnapshop (in schedule) and on each iteration of the top
+	// loop.
+	allpSnapshot := mp.snapshotAllp()
 	// Also snapshot masks. Value changes are OK, but we can't allow
 	// len to change out from under us.
 	idlepMaskSnapshot := idlepMask
@@ -3596,6 +3641,9 @@ top:
 		// allowed when we don't have an active P.
 		pollUntil = checkTimersNoP(allpSnapshot, timerpMaskSnapshot, pollUntil)
 	}
+
+	// We don't need allp anymore at this pointer, but can't clear the
+	// snapshot without a P for the write barrier..
 
 	// Poll network until next timer.
 	if netpollinited() && (netpollAnyWaiters() || pollUntil != 0) && sched.lastpoll.Swap(0) != 0 {
@@ -4036,6 +4084,11 @@ top:
 	}
 
 	gp, inheritTime, tryWakeP := findRunnable() // blocks until work is available
+
+	// findRunnable may have collected an allp snapshot. The snapshot is
+	// only required within findRunnable. Clear it to all GC to collect the
+	// slice.
+	mp.clearAllpSnapshot()
 
 	if debug.dontfreezetheworld > 0 && freezing.Load() {
 		// See comment in freezetheworld. We don't want to perturb

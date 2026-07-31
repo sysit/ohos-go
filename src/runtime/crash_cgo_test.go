@@ -255,6 +255,7 @@ func TestCgoCrashTraceback(t *testing.T) {
 	case "linux/amd64":
 	case "linux/arm64":
 	case "linux/ppc64le":
+	case "openharmony/arm64":
 	default:
 		t.Skipf("not yet supported on %s", platform)
 	}
@@ -273,6 +274,7 @@ func TestCgoCrashTracebackGo(t *testing.T) {
 	case "linux/amd64":
 	case "linux/arm64":
 	case "linux/ppc64le":
+	case "openharmony/arm64":
 	default:
 		t.Skipf("not yet supported on %s", platform)
 	}
@@ -383,7 +385,7 @@ func TestCgoPprofThreadNoTraceback(t *testing.T) {
 }
 
 func TestRaceProf(t *testing.T) {
-	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+	if !platform.RaceDetectorSupported(getGoos(), runtime.GOARCH) {
 		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
 	}
 	if runtime.GOOS == "windows" {
@@ -415,7 +417,7 @@ func TestRaceProf(t *testing.T) {
 }
 
 func TestRaceSignal(t *testing.T) {
-	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+	if !platform.RaceDetectorSupported(getGoos(), runtime.GOARCH) {
 		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
 	}
 	if runtime.GOOS == "windows" {
@@ -825,7 +827,7 @@ func TestDestructorCallbackRace(t *testing.T) {
 		t.Skip("skipping test in -short mode")
 	}
 
-	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+	if !platform.RaceDetectorSupported(getGoos(), runtime.GOARCH) {
 		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
 	}
 

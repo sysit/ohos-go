@@ -20,7 +20,7 @@ func TestExitHooks(t *testing.T) {
 	}
 	// Note the HasCGO() test below; this is to prevent the test
 	// running if CGO_ENABLED=0 is in effect.
-	haverace := platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH)
+	haverace := platform.RaceDetectorSupported(getGoos(), runtime.GOARCH)
 	if haverace && testenv.HasCGO() {
 		bmodes = append(bmodes, "-race")
 	}

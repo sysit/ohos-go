@@ -17,6 +17,7 @@ package net
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ifaddrs.h>
 
 #ifndef EAI_NODATA
 #define EAI_NODATA -5
@@ -60,6 +61,7 @@ type (
 	_C_socklen_t       = C.socklen_t
 	_C_struct_addrinfo = C.struct_addrinfo
 	_C_struct_sockaddr = C.struct_sockaddr
+	_C_struct_ifaddrs  = C.struct_ifaddrs
 )
 
 func _C_malloc(n uintptr) unsafe.Pointer { return C.malloc(C.size_t(n)) }
@@ -84,3 +86,14 @@ func _C_getaddrinfo(hostname, servname *_C_char, hints *_C_struct_addrinfo, res 
 	x, err := C.getaddrinfo(hostname, servname, hints, res)
 	return int(x), err
 }
+
+func _C_getifaddrs(res **_C_struct_ifaddrs) (int, error) {
+	x, err := C.getifaddrs(res)
+	return int(x), err
+}
+
+func _C_ifa_next(ifa *_C_struct_ifaddrs) **_C_struct_ifaddrs  { return &ifa.ifa_next }
+func _C_ifa_addr(ifa *_C_struct_ifaddrs) **_C_struct_sockaddr { return &ifa.ifa_addr }
+func _C_ifa_mask(ifa *_C_struct_ifaddrs) **_C_struct_sockaddr { return &ifa.ifa_netmask }
+func _C_ifa_flags(ifa *_C_struct_ifaddrs) *_C_uint            { return &ifa.ifa_flags }
+func _C_gifa_name(ifa *_C_struct_ifaddrs) string              { return C.GoString(ifa.ifa_name) }

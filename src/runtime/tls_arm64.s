@@ -18,12 +18,8 @@ TEXT runtime·load_g(SB),NOSPLIT,$0
 #endif
 #endif
 
-	MRS_TPIDR_R0
-#ifdef TLS_darwin
-	// Darwin sometimes returns unaligned pointers
-	AND	$0xfffffffffffffff8, R0
-#endif
-	MOVD	runtime·tls_g(SB), R27
+	LOAD_TLS_G_R0
+	LOAD_TP_R27
 	MOVD	(R0)(R27), g
 
 nocgo:
@@ -39,12 +35,8 @@ TEXT runtime·save_g(SB),NOSPLIT,$0
 #endif
 #endif
 
-	MRS_TPIDR_R0
-#ifdef TLS_darwin
-	// Darwin sometimes returns unaligned pointers
-	AND	$0xfffffffffffffff8, R0
-#endif
-	MOVD	runtime·tls_g(SB), R27
+	LOAD_TLS_G_R0
+	LOAD_TP_R27
 	MOVD	g, (R0)(R27)
 
 nocgo:

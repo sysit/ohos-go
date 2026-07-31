@@ -373,6 +373,13 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			} else {
 				log.Fatalf("cannot handle R_TLS_IE (sym %s) when linking internally", ldr.SymName(s))
 			}
+		case objabi.R_AMD64_TLS_GD:
+			if target.IsExternal() && target.IsElf() {
+				nExtReloc += 2 // need two ELF relocations, see amd64 elfreloc1
+				o = 0
+				break
+			}
+			log.Fatalf("cannot handle R_AMD64_TLS_GD (sym %s) when linking internally", ldr.SymName(s))
 		case objabi.R_ADDR, objabi.R_PEIMAGEOFF:
 			if weak && !ldr.AttrReachable(rs) {
 				// Redirect it to runtime.unreachableMethod, which will throw if called.
@@ -665,7 +672,7 @@ func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc) (loa
 	default:
 		return thearch.Extreloc(target, ldr, r, s)
 
-	case objabi.R_TLS_LE, objabi.R_TLS_IE:
+	case objabi.R_TLS_LE, objabi.R_TLS_IE, objabi.R_AMD64_TLS_GD:
 		if target.IsElf() {
 			rs := r.Sym()
 			rr.Xsym = rs

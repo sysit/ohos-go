@@ -390,6 +390,7 @@ func (s *LSym) checkFIPSReloc(ctxt *Link, rel Reloc) {
 		objabi.R_RISCV_BRANCH,
 		objabi.R_RISCV_RVC_BRANCH,
 		objabi.R_RISCV_RVC_JUMP,
+		objabi.R_AMD64_TLS_GD, // PC-relative TLS descriptor sequence (GOT-based, like R_TLS_IE)
 		objabi.R_TLS_IE,
 		objabi.R_TLS_LE,
 		objabi.R_WEAKADDROFF:

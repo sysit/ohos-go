@@ -1155,6 +1155,9 @@ func (t *tester) internalLink() bool {
 	if goos == "android" {
 		return false
 	}
+	if goos == "openharmony" {
+		return false
+	}
 	if goos == "ios" {
 		return false
 	}
@@ -1187,7 +1190,8 @@ func (t *tester) internalLinkPIE() bool {
 	case "darwin-amd64", "darwin-arm64",
 		"linux-amd64", "linux-arm64", "linux-ppc64le",
 		"android-arm64",
-		"windows-amd64", "windows-386", "windows-arm":
+		"windows-amd64", "windows-386", "windows-arm",
+		"openharmony-arm64", "openharmony-amd64":
 		return true
 	}
 	return false
@@ -1679,6 +1683,8 @@ func raceDetectorSupported(goos, goarch string) bool {
 		return goarch == "amd64" || goarch == "arm64"
 	case "freebsd", "netbsd", "windows":
 		return goarch == "amd64"
+	case "openharmony":
+		return goarch == "arm64"
 	default:
 		return false
 	}
@@ -1719,6 +1725,8 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			}
 		case "freebsd":
 			return goarch == "amd64"
+		case "openharmony":
+			return goarch == "arm64" || goarch == "amd64"
 		}
 		return false
 
@@ -1729,7 +1737,8 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			"freebsd/amd64",
 			"darwin/amd64", "darwin/arm64",
 			"windows/amd64", "windows/386", "windows/arm64",
-			"wasip1/wasm":
+			"wasip1/wasm",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
@@ -1749,14 +1758,15 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			"ios/amd64", "ios/arm64",
 			"aix/ppc64",
 			"openbsd/arm64",
-			"windows/386", "windows/amd64", "windows/arm", "windows/arm64":
+			"windows/386", "windows/amd64", "windows/arm", "windows/arm64",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
 
 	case "shared":
 		switch platform {
-		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x":
+		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x", "openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
@@ -1766,7 +1776,8 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 		case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/loong64", "linux/s390x", "linux/ppc64le",
 			"android/amd64", "android/386",
 			"darwin/amd64", "darwin/arm64",
-			"freebsd/amd64":
+			"freebsd/amd64",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false

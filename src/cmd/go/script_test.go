@@ -231,7 +231,7 @@ func scriptEnv(srv *vcstest.Server, srvCertFile string) ([]string, error) {
 		"GODEBUG=" + os.Getenv("GODEBUG"),
 		"GOEXE=" + cfg.ExeSuffix,
 		"GOEXPERIMENT=" + os.Getenv("GOEXPERIMENT"),
-		"GOOS=" + runtime.GOOS,
+		"GOOS=" + goos,
 		"TESTGO_GOHOSTOS=" + goHostOS,
 		"GOPROXY=" + proxyURL,
 		"GOPRIVATE=",
@@ -271,7 +271,7 @@ func scriptEnv(srv *vcstest.Server, srvCertFile string) ([]string, error) {
 		// short mode.
 		env = append(env, "TESTGOVCSREMOTE=panic")
 	}
-	if os.Getenv("CGO_ENABLED") != "" || runtime.GOOS != goHostOS || runtime.GOARCH != goHostArch {
+	if os.Getenv("CGO_ENABLED") != "" || goos != goHostOS || runtime.GOARCH != goHostArch {
 		// If the actual CGO_ENABLED might not match the cmd/go default, set it
 		// explicitly in the environment. Otherwise, leave it unset so that we also
 		// cover the default behaviors.

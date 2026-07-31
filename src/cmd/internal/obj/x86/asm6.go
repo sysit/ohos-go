@@ -2508,6 +2508,7 @@ func instinit(ctxt *obj.Link) {
 }
 
 var isAndroid = buildcfg.GOOS == "android"
+var isOpenharmony = buildcfg.GOOS == "openharmony"
 
 func prefixof(ctxt *obj.Link, a *obj.Addr) int {
 	if a.Reg < REG_CS && a.Index < REG_CS { // fast path
@@ -5184,6 +5185,48 @@ func (ab *AsmBuf) doasm(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog) {
 					case objabi.Hlinux, objabi.Hfreebsd:
 						if !ctxt.Flag_shared {
 							log.Fatalf("unknown TLS base location for linux/freebsd without -shared")
+						}
+						if ctxt.Tls == "GD" || (isOpenharmony && ctxt.Flag_shared) {
+							// General dynamic model via TLS descriptors, used on
+							// openharmony, whose musl loader rejects initial-exec
+							// TLS relocations in dlopen'ed libraries. Note that on
+							// openharmony this triggers on Flag_shared alone, because
+							// TLS loads reach here both from assembly (cmd/asm, which
+							// receives -tls=GD) and from compiler-generated code such
+							// as the g register reload after ABI0 calls (cmd/compile,
+							// which has no -tls flag).
+							//     MOV TLS, R_to
+							// becomes
+							//     [push %rax]                        (if R_to != AX)
+							//     lea runtime.tlsg@tlsdesc(%rip), %rax
+							//     call *(%rax)
+							//     [mov %rax, R_to; pop %rax]         (if R_to != AX)
+							// The R_AMD64_TLS_GD relocation covers the lea displacement;
+							// the linker turns it into R_X86_64_GOTPC32_TLSDESC plus
+							// R_X86_64_TLSDESC_CALL on the following call. The descriptor
+							// call returns the offset of the variable from the thread
+							// pointer in AX, preserving all other registers (flags may be
+							// clobbered). Like the IE form below, the result feeds the
+							// second instruction of the pair, which loads via FS.
+							dst := p.To.Reg
+							if dst != REG_AX {
+								ab.Put1(0x50) // push %rax
+							}
+							ab.Put3(0x48, 0x8d, 0x05) // lea 0(%rip), %rax
+							cursym.AddRel(ctxt, obj.Reloc{
+								Type: objabi.R_AMD64_TLS_GD,
+								Off:  int32(p.Pc + int64(ab.Len())),
+								Siz:  4,
+								Add:  -4,
+							})
+							ab.PutInt32(0)
+							ab.Put2(0xff, 0x10) // call *(%rax)
+							if dst != REG_AX {
+								// mov %rax, dst
+								ab.Put3(byte(0x48|(regrex[dst]&Rxb)), 0x89, byte(0xc0|reg[dst]))
+								ab.Put1(0x58) // pop %rax
+							}
+							break
 						}
 						// Note that this is not generating the same insn as the other cases.
 						//     MOV TLS, R_to

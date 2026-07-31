@@ -438,6 +438,18 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		} else {
 			return false
 		}
+	case objabi.R_AMD64_TLS_GD:
+		if siz == 4 {
+			// TLS descriptor sequence: lea tlsvar@tlsdesc(%rip), %rax
+			// followed by call *(%rax). Emit the marker relocation for
+			// the call in addition to the GOT-generating one for the lea.
+			out.Write64(uint64(elf.R_X86_64_GOTPC32_TLSDESC) | uint64(elfsym)<<32)
+			out.Write64(uint64(r.Xadd))
+			out.Write64(uint64(sectoff + 4))
+			out.Write64(uint64(elf.R_X86_64_TLSDESC_CALL) | uint64(elfsym)<<32)
+		} else {
+			return false
+		}
 	case objabi.R_CALL:
 		if siz == 4 {
 			if ldr.SymType(r.Xsym) == sym.SDYNIMPORT {

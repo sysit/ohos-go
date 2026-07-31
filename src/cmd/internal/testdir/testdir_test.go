@@ -171,7 +171,7 @@ func goFiles(t *testing.T, dir string) []string {
 	names := []string{}
 	for _, file := range files {
 		name := file.Name()
-		if !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go") && shardMatch(name) {
+		if !strings.HasPrefix(name, ".") && (strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".s")) && shardMatch(name) {
 			names = append(names, name)
 		}
 	}
@@ -419,7 +419,7 @@ func (ctxt *context) match(name string) bool {
 		return true
 	}
 
-	if name == ctxt.GOOS || name == ctxt.GOARCH || name == "gc" {
+	if name == ctxt.GOOS || (name == "linux" && ctxt.GOOS == "openharmony") || name == ctxt.GOARCH || name == "gc" {
 		return true
 	}
 
@@ -506,7 +506,7 @@ func (t test) run() error {
 
 	// TODO: Clean up/simplify this switch statement.
 	switch action {
-	case "compile", "compiledir", "build", "builddir", "buildrundir", "run", "buildrun", "runoutput", "rundir", "runindir", "asmcheck":
+	case "compile", "compiledir", "build", "builddir", "buildrundir", "run", "buildrun", "runoutput", "rundir", "runindir", "asmcheck", "objcheck":
 		// nothing to do
 	case "errorcheckandrundir":
 		wantError = false // should be no error if also will run
@@ -687,11 +687,15 @@ func (t test) run() error {
 		t.Fatalf("unimplemented action %q", action)
 		panic("unreachable")
 
-	case "asmcheck":
+	case "asmcheck", "objcheck":
 		// Compile Go file and match the generated assembly
 		// against a set of regexps in comments.
 		ops := t.wantedAsmOpcodes(long)
 		self := runtime.GOOS + "/" + runtime.GOARCH
+		objname := ""
+		if action == "objcheck" {
+			objname = long + ".o"
+		}
 		for _, env := range ops.Envs() {
 			// Only run checks relevant to the current GOOS/GOARCH,
 			// to avoid triggering a cross-compile of the runtime.
@@ -700,22 +704,35 @@ func (t test) run() error {
 			}
 			// -S=2 forces outermost line numbers when disassembling inlined code.
 			cmdline := []string{"build", "-gcflags", "-S=2"}
+			if action == "objcheck" {
+				cmdline[2] = "-o=" + objname
+			}
 
-			// Append flags, but don't override -gcflags=-S=2; add to it instead.
-			for i := 0; i < len(flags); i++ {
-				flag := flags[i]
-				switch {
-				case strings.HasPrefix(flag, "-gcflags="):
-					cmdline[2] += " " + strings.TrimPrefix(flag, "-gcflags=")
-				case strings.HasPrefix(flag, "--gcflags="):
-					cmdline[2] += " " + strings.TrimPrefix(flag, "--gcflags=")
-				case flag == "-gcflags", flag == "--gcflags":
-					i++
-					if i < len(flags) {
-						cmdline[2] += " " + flags[i]
-					}
-				default:
+			if strings.HasSuffix(t.goFileName(), ".s") {
+				cmdline[0] = "tool"
+				cmdline[1] = "asm"
+				// Append flags
+				for i := 0; i < len(flags); i++ {
+					flag := flags[i]
 					cmdline = append(cmdline, flag)
+				}
+			} else {
+				// Append flags, but don't override -gcflags=-S=2; add to it instead.
+				for i := 0; i < len(flags); i++ {
+					flag := flags[i]
+					switch {
+					case strings.HasPrefix(flag, "-gcflags="):
+						cmdline[2] += " " + strings.TrimPrefix(flag, "-gcflags=")
+					case strings.HasPrefix(flag, "--gcflags="):
+						cmdline[2] += " " + strings.TrimPrefix(flag, "--gcflags=")
+					case flag == "-gcflags", flag == "--gcflags":
+						i++
+						if i < len(flags) {
+							cmdline[2] += " " + flags[i]
+						}
+					default:
+						cmdline = append(cmdline, flag)
+					}
 				}
 			}
 
@@ -733,9 +750,24 @@ func (t test) run() error {
 				return err
 			}
 
-			err := t.asmCheck(buf.String(), long, env, ops[env])
+			if action == "objcheck" {
+				dumpline := []string{"tool", "objdump", objname}
+				cmd := exec.Command(goTool, dumpline...)
+				cmd.Env = append(os.Environ(), env.Environ()...)
+				cmd.Stdout, cmd.Stderr = &buf, &buf
+				if err := cmd.Run(); err != nil {
+					t.Log(env, "\n", cmd.Stderr)
+					return err
+				}
+				err = t.objCheck(buf.String(), t.gorootTestDir, t.goFileName(), env, ops[env])
+			} else {
+				err = t.asmCheck(buf.String(), long, env, ops[env])
+			}
 			if err != nil {
 				return err
+			}
+			if err := os.Remove(objname); err != nil {
+				t.Log(env, "\n", cmd.Stderr)
 			}
 		}
 		return nil
@@ -1703,6 +1735,92 @@ func (t test) asmCheck(outStr string, fn string, env buildEnv, fullops map[strin
 	}
 
 	// At least one asmcheck failed; report them.
+	lastFunction := -1
+	var errbuf bytes.Buffer
+	fmt.Fprintln(&errbuf)
+	sort.Slice(failed, func(i, j int) bool { return failed[i].line < failed[j].line })
+	for _, o := range failed {
+		// Dump the function in which this opcode check was supposed to
+		// pass but failed.
+		funcIdx := lineFuncMap[o.fileline]
+		if funcIdx != 0 && funcIdx != lastFunction {
+			funcLines := lines[functionMarkers[funcIdx]:functionMarkers[funcIdx+1]]
+			t.Log(strings.Join(funcLines, "\n"))
+			lastFunction = funcIdx // avoid printing same function twice
+		}
+
+		if o.negative {
+			fmt.Fprintf(&errbuf, "%s:%d: %s: wrong opcode found: %q\n", t.goFileName(), o.line, env, o.opcode.String())
+		} else {
+			fmt.Fprintf(&errbuf, "%s:%d: %s: opcode not found: %q\n", t.goFileName(), o.line, env, o.opcode.String())
+		}
+	}
+	return errors.New(errbuf.String())
+}
+
+func (t test) objCheck(outStr string, dir, sn string, env buildEnv, fullops map[string][]wantedAsmOpcode) error {
+	// The objdump disassembly contains the concatenated dump of multiple functions.
+	// The first line of each function begins with "TEXT".
+	// The objCheck's processed format differs from the asmCheck's one in two ways:
+	// 1. objdump's output shows shortened file names instead of full paths
+	// 2. each line prefixes the disassembly with the machine encoding
+	//
+	// When writing test patterns, use ".*\b" to match past that prefix and reach
+	// the disassembly text, unless you specifically need to verify
+	// the machine instruction encoding.
+
+	functionMarkers := make([]int, 1)
+	lineFuncMap := make(map[string]int)
+
+	lines := strings.Split(outStr, "\n")
+	rxLine := regexp.MustCompile(fmt.Sprintf(`(%s:\d+)\s+(.*\S)`, regexp.QuoteMeta(sn)))
+
+	for nl, line := range lines {
+		// Check if this line begins a function
+		if len(line) > 0 && strings.HasPrefix(line, "TEXT") {
+			functionMarkers = append(functionMarkers, nl)
+		}
+
+		// Search if this line contains a disassembled opcode (which is prefixed by the
+		// short source file/line in parenthesis)
+		matches := rxLine.FindStringSubmatch(line)
+		if len(matches) == 0 {
+			continue
+		}
+		srcFileLine, asm := filepath.Join(dir, matches[1]), matches[2]
+
+		// Associate the original file/line information to the current
+		// function in the output; it will be useful to dump it in case
+		// of error.
+		lineFuncMap[srcFileLine] = len(functionMarkers) - 1
+
+		// If there are opcode checks associated to this source file/line,
+		// run the checks.
+		if ops, found := fullops[srcFileLine]; found {
+			for i := range ops {
+				if !ops[i].found && ops[i].opcode.FindString(asm) != "" {
+					ops[i].found = true
+				}
+			}
+		}
+	}
+	functionMarkers = append(functionMarkers, len(lines))
+
+	var failed []wantedAsmOpcode
+	for _, ops := range fullops {
+		for _, o := range ops {
+			// There's a failure if a negative match was found,
+			// or a positive match was not found.
+			if o.negative == o.found {
+				failed = append(failed, o)
+			}
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+
+	// At least one objcheck failed; report them.
 	lastFunction := -1
 	var errbuf bytes.Buffer
 	fmt.Fprintln(&errbuf)

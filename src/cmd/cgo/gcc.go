@@ -659,7 +659,7 @@ func (p *Package) loadDWARF(f *File, conv *typeConv, names []*Name) {
 			n.Kind = "func"
 			n.FuncType = conv.FuncType(f, pos)
 		} else {
-			n.Type = conv.Type(types[i], pos)
+			n.Type = conv.Type(unqual(types[i]), pos)
 			switch n.Kind {
 			case "iconst":
 				if i < len(ints) {

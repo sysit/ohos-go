@@ -61,7 +61,7 @@ func ASanSupported(goos, goarch string) bool {
 // ('go test -fuzz=.').
 func FuzzSupported(goos, goarch string) bool {
 	switch goos {
-	case "darwin", "freebsd", "linux", "windows":
+	case "darwin", "freebsd", "linux", "windows", "openharmony":
 		return true
 	default:
 		return false
@@ -109,6 +109,8 @@ func MustLinkExternal(goos, goarch string, withCgo bool) bool {
 			// It seems that on Dragonfly thread local storage is
 			// set up by the dynamic linker, so internal cgo linking
 			// doesn't work. Test case is "go test runtime/cgo".
+			return true
+		case "openharmony":
 			return true
 		}
 	}
@@ -164,6 +166,8 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			}
 		case "freebsd":
 			return goarch == "amd64"
+		case "openharmony":
+			return goarch == "arm64" || goarch == "amd64"
 		}
 		return false
 
@@ -174,7 +178,8 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			"freebsd/amd64",
 			"darwin/amd64", "darwin/arm64",
 			"windows/amd64", "windows/386", "windows/arm64",
-			"wasip1/wasm":
+			"wasip1/wasm",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
@@ -194,14 +199,15 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			"ios/amd64", "ios/arm64",
 			"aix/ppc64",
 			"openbsd/arm64",
-			"windows/386", "windows/amd64", "windows/arm", "windows/arm64":
+			"windows/386", "windows/amd64", "windows/arm", "windows/arm64",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
 
 	case "shared":
 		switch platform {
-		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x":
+		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x", "openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
@@ -211,7 +217,8 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 		case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/loong64", "linux/s390x", "linux/ppc64le",
 			"android/amd64", "android/386",
 			"darwin/amd64", "darwin/arm64",
-			"freebsd/amd64":
+			"freebsd/amd64",
+			"openharmony/arm64", "openharmony/amd64":
 			return true
 		}
 		return false
@@ -226,7 +233,7 @@ func InternalLinkPIESupported(goos, goarch string) bool {
 	case "android/arm64",
 		"darwin/amd64", "darwin/arm64",
 		"linux/amd64", "linux/arm64", "linux/ppc64le",
-		"windows/386", "windows/amd64", "windows/arm", "windows/arm64":
+		"windows/386", "windows/amd64", "windows/arm", "windows/arm64", "openharmony/arm64", "openharmony/amd64":
 		return true
 	}
 	return false

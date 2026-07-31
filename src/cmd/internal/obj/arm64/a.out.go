@@ -473,6 +473,11 @@ const (
 	// offset from the thread local base.
 	C_TLS_IE
 
+	// TLS "var" in general dynamic mode: does not assume that module number
+	// or variable offset is known at link time, will be lowered to instructions
+	// sequence ending with a call which the dynamic linker will fix up.
+	C_TLS_GD
+
 	C_ROFF // register offset (including register extended)
 
 	C_GOK

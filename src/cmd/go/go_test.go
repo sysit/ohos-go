@@ -64,6 +64,7 @@ var (
 var (
 	goHostOS, goHostArch string
 	cgoEnabled           string // raw value from 'go env CGO_ENABLED'
+	goos                 string
 )
 
 // netTestSem is a semaphore limiting the number of tests that may use the
@@ -239,6 +240,10 @@ func TestMain(m *testing.M) {
 		os.Setenv("TESTGO_GOHOSTARCH", goHostArch)
 
 		cgoEnabled = goEnv("CGO_ENABLED")
+		goos = runtime.GOOS
+		if runtime.IsOpenharmony {
+			goos = "openharmony"
+		}
 
 		// Duplicate the test executable into the path at testGo, for $PATH.
 		// If the OS supports symlinks, use them instead of copying bytes.
@@ -1532,7 +1537,7 @@ func TestListTemplateContextFunction(t *testing.T) {
 		want string
 	}{
 		{"GOARCH", runtime.GOARCH},
-		{"GOOS", runtime.GOOS},
+		{"GOOS", goos},
 		{"GOROOT", testGOROOT},
 		{"GOPATH", os.Getenv("GOPATH")},
 		{"CgoEnabled", ""},
