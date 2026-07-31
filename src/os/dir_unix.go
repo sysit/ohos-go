@@ -46,11 +46,19 @@ func (d *dirInfo) close() {
 
 func (f *File) readdir(n int, mode readdirMode) (names []string, dirents []DirEntry, infos []FileInfo, err error) {
 	// If this file has no dirInfo, create one.
-	d := f.dirinfo.Load()
-	if d == nil {
-		d = new(dirInfo)
-		f.dirinfo.Store(d)
+	var d *dirInfo
+	for {
+		d = f.dirinfo.Load()
+		if d != nil {
+			break
+		}
+		newD := new(dirInfo)
+		if f.dirinfo.CompareAndSwap(nil, newD) {
+			d = newD
+			break
+		}
 	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.buf == nil {
@@ -104,7 +112,8 @@ func (f *File) readdir(n int, mode readdirMode) (names []string, dirents []DirEn
 		// or might expose a remote file system which does not have the concept
 		// of inodes. Therefore, we cannot make the assumption that it is safe
 		// to skip entries with zero inodes.
-		if ino == 0 && runtime.GOOS != "wasip1" {
+		// Some Linux filesystems (old XFS, FUSE) can return valid files with zero inodes.
+		if ino == 0 && runtime.GOOS != "linux" && runtime.GOOS != "wasip1" {
 			continue
 		}
 		const namoff = uint64(unsafe.Offsetof(syscall.Dirent{}.Name))
@@ -129,7 +138,7 @@ func (f *File) readdir(n int, mode readdirMode) (names []string, dirents []DirEn
 		if mode == readdirName {
 			names = append(names, string(name))
 		} else if mode == readdirDirEntry {
-			de, err := newUnixDirent(f.name, string(name), direntType(rec))
+			de, err := newUnixDirent(f, string(name), direntType(rec))
 			if IsNotExist(err) {
 				// File disappeared between readdir and stat.
 				// Treat as if it didn't exist.
@@ -140,7 +149,7 @@ func (f *File) readdir(n int, mode readdirMode) (names []string, dirents []DirEn
 			}
 			dirents = append(dirents, de)
 		} else {
-			info, err := lstat(f.name + "/" + string(name))
+			info, err := f.lstatat(string(name))
 			if IsNotExist(err) {
 				// File disappeared between readdir + stat.
 				// Treat as if it didn't exist.

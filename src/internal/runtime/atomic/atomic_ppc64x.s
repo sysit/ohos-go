@@ -78,13 +78,14 @@ TEXT ·LoadAcq64(SB),NOSPLIT|NOFRAME,$-8-16
 	MOVD   R3, ret+8(FP)
 	RET
 
-// bool cas(uint32 *ptr, uint32 old, uint32 new)
+// func Cas(ptr *int32, old, new int32) bool
 // Atomically:
-//	if(*val == old){
-//		*val = new;
-//		return 1;
-//	} else
-//		return 0;
+//	if *ptr == old {
+//		*ptr = new
+//		return true
+//	} else {
+//		return false
+//	}
 TEXT ·Cas(SB), NOSPLIT, $0-17
 	MOVD	ptr+0(FP), R3
 	MOVWZ	old+8(FP), R4
@@ -105,13 +106,13 @@ cas_fail:
 	MOVB	R0, ret+16(FP)
 	RET
 
-// bool	·Cas64(uint64 *ptr, uint64 old, uint64 new)
+// func	Cas64(ptr *uint64, old, new uint64) bool
 // Atomically:
-//	if(*val == old){
-//		*val = new;
-//		return 1;
+//	if *ptr == old {
+//		*ptr = new
+//		return true
 //	} else {
-//		return 0;
+//		return false
 //	}
 TEXT ·Cas64(SB), NOSPLIT, $0-25
 	MOVD	ptr+0(FP), R3
@@ -196,13 +197,14 @@ TEXT ·Xaddint32(SB), NOSPLIT, $0-20
 TEXT ·Xaddint64(SB), NOSPLIT, $0-24
 	BR	·Xadd64(SB)
 
-// bool casp(void **val, void *old, void *new)
+// func Casp1(ptr *unsafe.Pointer, old, new unsafe.Pointer) bool
 // Atomically:
-//	if(*val == old){
-//		*val = new;
-//		return 1;
-//	} else
-//		return 0;
+//	if *ptr == old {
+//		*ptr = new
+//		return true
+//	} else {
+//		return false
+//	}
 TEXT ·Casp1(SB), NOSPLIT, $0-25
 	BR ·Cas64(SB)
 
@@ -218,6 +220,7 @@ TEXT ·Xadd(SB), NOSPLIT, $0-20
 	ADD	R5, R3
 	STWCCC	R3, (R4)
 	BNE	-3(PC)
+	LWSYNC
 	MOVW	R3, ret+16(FP)
 	RET
 
@@ -233,6 +236,7 @@ TEXT ·Xadd64(SB), NOSPLIT, $0-24
 	ADD	R5, R3
 	STDCCC	R3, (R4)
 	BNE	-3(PC)
+	LWSYNC
 	MOVD	R3, ret+16(FP)
 	RET
 
@@ -341,6 +345,7 @@ again:
 	OR	R4, R6
 	STBCCC	R6, (R3)
 	BNE	again
+	LWSYNC
 	RET
 
 // void ·And8(byte volatile*, byte);
@@ -353,6 +358,7 @@ again:
 	AND	R4, R6
 	STBCCC	R6, (R3)
 	BNE	again
+	LWSYNC
 	RET
 
 // func Or(addr *uint32, v uint32)
@@ -365,6 +371,7 @@ again:
 	OR	R4, R6
 	STWCCC	R6, (R3)
 	BNE	again
+	LWSYNC
 	RET
 
 // func And(addr *uint32, v uint32)
@@ -377,6 +384,7 @@ again:
 	AND	R4, R6
 	STWCCC	R6, (R3)
 	BNE	again
+	LWSYNC
 	RET
 
 // func Or32(addr *uint32, v uint32) old uint32
@@ -389,6 +397,7 @@ again:
 	OR	R4, R6, R7
 	STWCCC	R7, (R3)
 	BNE	again
+	LWSYNC
 	MOVW	R6, ret+16(FP)
 	RET
 
@@ -402,6 +411,7 @@ again:
 	AND	R4, R6, R7
 	STWCCC	R7, (R3)
 	BNE	again
+	LWSYNC
 	MOVW	R6, ret+16(FP)
 	RET
 
@@ -415,6 +425,7 @@ again:
 	OR	R4, R6, R7
 	STDCCC	R7, (R3)
 	BNE	again
+	LWSYNC
 	MOVD	R6, ret+16(FP)
 	RET
 
@@ -428,6 +439,7 @@ again:
 	AND	R4, R6, R7
 	STDCCC	R7, (R3)
 	BNE	again
+	LWSYNC
 	MOVD	R6, ret+16(FP)
 	RET
 

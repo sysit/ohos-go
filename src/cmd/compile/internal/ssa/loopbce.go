@@ -37,19 +37,20 @@ type indVar struct {
 //   - the minimum bound
 //   - the increment value
 //   - the "next" value (SSA value that is Phi'd into the induction variable every loop)
+//   - the header's edge returning from the body
 //
 // Currently, we detect induction variables that match (Phi min nxt),
 // with nxt being (Add inc ind).
 // If it can't parse the induction variable correctly, it returns (nil, nil, nil).
-func parseIndVar(ind *Value) (min, inc, nxt *Value) {
+func parseIndVar(ind *Value) (min, inc, nxt *Value, loopReturn Edge) {
 	if ind.Op != OpPhi {
 		return
 	}
 
 	if n := ind.Args[0]; (n.Op == OpAdd64 || n.Op == OpAdd32 || n.Op == OpAdd16 || n.Op == OpAdd8) && (n.Args[0] == ind || n.Args[1] == ind) {
-		min, nxt = ind.Args[1], n
+		min, nxt, loopReturn = ind.Args[1], n, ind.Block.Preds[0]
 	} else if n := ind.Args[1]; (n.Op == OpAdd64 || n.Op == OpAdd32 || n.Op == OpAdd16 || n.Op == OpAdd8) && (n.Args[0] == ind || n.Args[1] == ind) {
-		min, nxt = ind.Args[0], n
+		min, nxt, loopReturn = ind.Args[0], n, ind.Block.Preds[1]
 	} else {
 		// Not a recognized induction variable.
 		return
@@ -111,13 +112,13 @@ func findIndVar(f *Func) []indVar {
 
 		// See if this is really an induction variable
 		less := true
-		init, inc, nxt := parseIndVar(ind)
+		init, inc, nxt, loopReturn := parseIndVar(ind)
 		if init == nil {
 			// We failed to parse the induction variable. Before punting, we want to check
 			// whether the control op was written with the induction variable on the RHS
 			// instead of the LHS. This happens for the downwards case, like:
 			//     for i := len(n)-1; i >= 0; i--
-			init, inc, nxt = parseIndVar(limit)
+			init, inc, nxt, loopReturn = parseIndVar(limit)
 			if init == nil {
 				// No recognized induction variable on either operand
 				continue
@@ -142,6 +143,26 @@ func findIndVar(f *Func) []indVar {
 		}
 		step := inc.AuxInt
 		if step == 0 {
+			continue
+		}
+		// step == minInt64 cannot be safely negated below, because -step
+		// overflows back to minInt64. The later underflow checks need a
+		// positive magnitude, so reject this case here.
+		if step == minSignedValue(ind.Type) {
+			continue
+		}
+
+		// startBody is the edge that eventually returns to the loop header.
+		var startBody Edge
+		switch {
+		case sdom.IsAncestorEq(b.Succs[0].b, loopReturn.b):
+			startBody = b.Succs[0]
+		case sdom.IsAncestorEq(b.Succs[1].b, loopReturn.b):
+			// if x { goto exit } else { goto entry } is identical to if !x { goto entry } else { goto exit }
+			startBody = b.Succs[1]
+			less = !less
+			inclusive = !inclusive
+		default:
 			continue
 		}
 
@@ -172,14 +193,14 @@ func findIndVar(f *Func) []indVar {
 		// First condition: loop entry has a single predecessor, which
 		// is the header block.  This implies that b.Succs[0] is
 		// reached iff ind < limit.
-		if len(b.Succs[0].b.Preds) != 1 {
-			// b.Succs[1] must exit the loop.
+		if len(startBody.b.Preds) != 1 {
+			// the other successor must exit the loop.
 			continue
 		}
 
-		// Second condition: b.Succs[0] dominates nxt so that
+		// Second condition: startBody.b dominates nxt so that
 		// nxt is computed when inc < limit.
-		if !sdom.IsAncestorEq(b.Succs[0].b, nxt.Block) {
+		if !sdom.IsAncestorEq(startBody.b, nxt.Block) {
 			// inc+ind can only be reached through the branch that enters the loop.
 			continue
 		}
@@ -204,9 +225,11 @@ func findIndVar(f *Func) []indVar {
 						if init.AuxInt > v {
 							return false
 						}
+						// TODO(1.27): investigate passing a smaller-magnitude overflow limit to addU
+						// for addWillOverflow.
 						v = addU(init.AuxInt, diff(v, init.AuxInt)/uint64(step)*uint64(step))
 					}
-					if addWillOverflow(v, step) {
+					if addWillOverflow(v, step, maxSignedValue(ind.Type)) {
 						return false
 					}
 					if inclusive && v != limit.AuxInt || !inclusive && v+1 != limit.AuxInt {
@@ -235,7 +258,7 @@ func findIndVar(f *Func) []indVar {
 				// ind < knn - k cannot overflow if step is at most k+1
 				return step <= k+1 && k != maxSignedValue(limit.Type)
 			} else { // step < 0
-				if limit.Op == OpConst64 {
+				if limit.isGenericIntConst() {
 					// Figure out the actual smallest value.
 					v := limit.AuxInt
 					if !inclusive {
@@ -249,9 +272,11 @@ func findIndVar(f *Func) []indVar {
 						if init.AuxInt < v {
 							return false
 						}
+						// TODO(1.27): investigate passing a smaller-magnitude underflow limit to subU
+						// for subWillUnderflow.
 						v = subU(init.AuxInt, diff(init.AuxInt, v)/uint64(-step)*uint64(-step))
 					}
-					if subWillUnderflow(v, -step) {
+					if subWillUnderflow(v, -step, minSignedValue(ind.Type)) {
 						return false
 					}
 					if inclusive && v != limit.AuxInt || !inclusive && v-1 != limit.AuxInt {
@@ -298,7 +323,7 @@ func findIndVar(f *Func) []indVar {
 				nxt:   nxt,
 				min:   min,
 				max:   max,
-				entry: b.Succs[0].b,
+				entry: startBody.b,
 				flags: flags,
 			})
 			b.Logf("found induction variable %v (inc = %v, min = %v, max = %v)\n", ind, inc, min, max)
@@ -313,14 +338,22 @@ func findIndVar(f *Func) []indVar {
 	return iv
 }
 
-// addWillOverflow reports whether x+y would result in a value more than maxint.
-func addWillOverflow(x, y int64) bool {
-	return x+y < x
+// subWillUnderflow checks if x - y underflows the min value.
+// y must be positive.
+func subWillUnderflow(x, y int64, min int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x < min+y
 }
 
-// subWillUnderflow reports whether x-y would result in a value less than minint.
-func subWillUnderflow(x, y int64) bool {
-	return x-y > x
+// addWillOverflow checks if x + y overflows the max value.
+// y must be positive.
+func addWillOverflow(x, y int64, max int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x > max-y
 }
 
 // diff returns x-y as a uint64. Requires x>=y.
@@ -341,7 +374,8 @@ func addU(x int64, y uint64) int64 {
 		x += 1
 		y -= 1 << 63
 	}
-	if addWillOverflow(x, int64(y)) {
+	// TODO(1.27): investigate passing a smaller-magnitude overflow limit in here.
+	if addWillOverflow(x, int64(y), maxSignedValue(types.Types[types.TINT64])) {
 		base.Fatalf("addU overflowed %d + %d", x, y)
 	}
 	return x + int64(y)
@@ -357,7 +391,8 @@ func subU(x int64, y uint64) int64 {
 		x -= 1
 		y -= 1 << 63
 	}
-	if subWillUnderflow(x, int64(y)) {
+	// TODO(1.27): investigate passing a smaller-magnitude underflow limit in here.
+	if subWillUnderflow(x, int64(y), minSignedValue(types.Types[types.TINT64])) {
 		base.Fatalf("subU underflowed %d - %d", x, y)
 	}
 	return x - int64(y)

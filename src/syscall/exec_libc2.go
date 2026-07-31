@@ -48,8 +48,9 @@ func runtime_AfterForkInChild()
 // they might have been locked at the time of the fork. This means
 // no rescheduling, no malloc calls, and no new stack segments.
 // For the same reason compiler does not race instrument it.
-// The calls to rawSyscall are okay because they are assembly
-// functions that do not grow the stack.
+// The calls to rawSyscall are okay because they are nosplit
+// functions that do not grow the stack and are not race
+// instrumented (go:norace).
 //
 //go:norace
 func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid int, err1 Errno) {
@@ -59,7 +60,6 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 		r1              uintptr
 		nextfd          int
 		i               int
-		err             error
 		pgrp            _C_int
 		cred            *Credential
 		ngroups, groups uintptr
@@ -99,8 +99,12 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 
 	// Enable tracing if requested.
 	if sys.Ptrace {
-		if err = ptrace(PTRACE_TRACEME, 0, 0, 0); err != nil {
-			err1 = err.(Errno)
+		if runtime.GOOS == "ios" {
+			err1 = ENOSYS
+			goto childerror
+		}
+		_, _, err1 = rawSyscall6(abi.FuncPCABI0(libc_ptrace_trampoline), PTRACE_TRACEME, 0, 0, 0, 0, 0)
+		if err1 != 0 {
 			goto childerror
 		}
 	}
