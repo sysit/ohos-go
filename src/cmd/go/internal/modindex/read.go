@@ -146,6 +146,8 @@ func GetPackage(modroot, pkgdir string) (*IndexPackage, error) {
 	if strings.Contains(filepath.ToSlash(pkgdir), "internal/fips140/v") {
 		return nil, errFIPS140
 	}
+	modroot = filepath.Clean(modroot)
+	pkgdir = filepath.Clean(pkgdir)
 	return openIndexPackage(modroot, pkgdir)
 }
 
@@ -154,7 +156,7 @@ func GetPackage(modroot, pkgdir string) (*IndexPackage, error) {
 // using the index, for instance because the index is disabled, or the package
 // is not in a module.
 func GetModule(modroot string) (*Module, error) {
-	dir, _ := cache.DefaultDir()
+	dir, _, _ := cache.DefaultDir()
 	if !enabled || dir == "off" {
 		return nil, errDisabled
 	}
@@ -678,7 +680,7 @@ func (rp *IndexPackage) Import(bctxt build.Context, mode build.ImportMode) (p *b
 // and otherwise falling back to internal/goroot.IsStandardPackage
 func IsStandardPackage(goroot_, compiler, path string) bool {
 	if !enabled || compiler != "gc" {
-		return goroot.IsStandardPackage(goroot_, compiler, path)
+		return goroot.IsStandardPackage(fsys.ReadDir, goroot_, compiler, path)
 	}
 
 	reldir := filepath.FromSlash(path) // relative dir path in module index for package
@@ -693,7 +695,7 @@ func IsStandardPackage(goroot_, compiler, path string) bool {
 	} else if errors.Is(err, ErrNotIndexed) {
 		// Fall back because package isn't indexable. (Probably because
 		// a file was modified recently)
-		return goroot.IsStandardPackage(goroot_, compiler, path)
+		return goroot.IsStandardPackage(fsys.ReadDir, goroot_, compiler, path)
 	}
 	return false
 }
@@ -1035,11 +1037,6 @@ func (r *reader) int() int {
 // string reads the next string.
 func (r *reader) string() string {
 	return r.d.stringTableAt(r.int())
-}
-
-// bool reads the next bool.
-func (r *reader) bool() bool {
-	return r.int() != 0
 }
 
 // tokpos reads the next token.Position.

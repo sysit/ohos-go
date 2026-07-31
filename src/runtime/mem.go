@@ -19,7 +19,7 @@ import "unsafe"
 //               fault, may give back unexpected zeroes, etc.).
 // 4) Ready - may be accessed safely.
 //
-// This set of states is more than is strictly necessary to support all the
+// This set of states is more than strictly necessary to support all the
 // currently supported platforms. One could get by with just None, Reserved, and
 // Ready. However, the Prepared state gives us flexibility for performance
 // purposes. For example, on POSIX-y operating systems, Reserved is usually a
@@ -46,10 +46,18 @@ import "unsafe"
 // which prevents us from allocating more stack.
 //
 //go:nosplit
-func sysAlloc(n uintptr, sysStat *sysMemStat) unsafe.Pointer {
+func sysAlloc(n uintptr, sysStat *sysMemStat, vmaName string) unsafe.Pointer {
 	sysStat.add(int64(n))
 	gcController.mappedReady.Add(int64(n))
-	return sysAllocOS(n)
+	p := sysAllocOS(n, vmaName)
+
+	// When using ASAN leak detection, we must tell ASAN about
+	// cases where we store pointers in mmapped memory.
+	if asanenabled {
+		lsanregisterrootregion(p, n)
+	}
+
+	return p
 }
 
 // sysUnused transitions a memory region from Ready to Prepared. It notifies the
@@ -60,6 +68,12 @@ func sysAlloc(n uintptr, sysStat *sysMemStat) unsafe.Pointer {
 func sysUnused(v unsafe.Pointer, n uintptr) {
 	gcController.mappedReady.Add(-int64(n))
 	sysUnusedOS(v, n)
+}
+
+// needZeroAfterSysUnused reports whether memory returned by sysUnused must be
+// zeroed for use.
+func needZeroAfterSysUnused() bool {
+	return needZeroAfterSysUnusedOS()
 }
 
 // sysUsed transitions a memory region from Prepared to Ready. It notifies the
@@ -106,11 +120,25 @@ func sysHugePageCollapse(v unsafe.Pointer, n uintptr) {
 //
 // sysStat must be non-nil.
 //
+// The size and start address must exactly match the size and returned address
+// from the original sysAlloc/sysReserve/sysReserveAligned call. That is,
+// sysFree cannot be used to free a subset of a memory region.
+//
 // Don't split the stack as this function may be invoked without a valid G,
 // which prevents us from allocating more stack.
 //
 //go:nosplit
 func sysFree(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+	// When using ASAN leak detection, the memory being freed is known by
+	// the sanitizer. We need to unregister it so it's not accessed by it.
+	//
+	// lsanunregisterrootregion matches regions by start address and size,
+	// so it is not possible to unregister a subset of the region. This is
+	// why sysFree requires the full region from the initial allocation.
+	if asanenabled {
+		lsanunregisterrootregion(v, n)
+	}
+
 	sysStat.add(-int64(n))
 	gcController.mappedReady.Add(-int64(n))
 	sysFreeOS(v, n)
@@ -135,22 +163,118 @@ func sysFault(v unsafe.Pointer, n uintptr) {
 // (either via permissions or not committing the memory). Such a reservation is
 // thus never backed by physical memory.
 //
-// If the pointer passed to it is non-nil, the caller wants the
-// reservation there, but sysReserve can still choose another
-// location if that one is unavailable.
+// If the pointer passed to it is non-nil, the caller wants the reservation
+// there, but sysReserve can still choose another location if that one is
+// unavailable.
 //
-// NOTE: sysReserve returns OS-aligned memory, but the heap allocator
-// may use larger alignment, so the caller must be careful to realign the
-// memory obtained by sysReserve.
-func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
-	return sysReserveOS(v, n)
+// sysReserve returns OS-aligned memory. If a larger alignment is required, use
+// sysReservedAligned.
+func sysReserve(v unsafe.Pointer, n uintptr, vmaName string) unsafe.Pointer {
+	p := sysReserveOS(v, n, vmaName)
+
+	// When using ASAN leak detection, we must tell ASAN about
+	// cases where we store pointers in mmapped memory.
+	if asanenabled {
+		lsanregisterrootregion(p, n)
+	}
+
+	return p
+}
+
+// sysReserveAligned transitions a memory region from None to Reserved.
+//
+// Semantics are equivlent to sysReserve, but the returned pointer is aligned
+// to align bytes. It may reserve either n or n+align bytes, so it returns the
+// size that was reserved.
+func sysReserveAligned(v unsafe.Pointer, size, align uintptr, vmaName string) (unsafe.Pointer, uintptr) {
+	if isSbrkPlatform {
+		if v != nil {
+			throw("unexpected heap arena hint on sbrk platform")
+		}
+		return sysReserveAlignedSbrk(size, align)
+	}
+	// Since the alignment is rather large in uses of this
+	// function, we're not likely to get it by chance, so we ask
+	// for a larger region and remove the parts we don't need.
+	retries := 0
+retry:
+	p := uintptr(sysReserve(v, size+align, vmaName))
+	switch {
+	case p == 0:
+		return nil, 0
+	case p&(align-1) == 0:
+		return unsafe.Pointer(p), size + align
+	case GOOS == "windows":
+		// On Windows we can't release pieces of a
+		// reservation, so we release the whole thing and
+		// re-reserve the aligned sub-region. This may race,
+		// so we may have to try again.
+		sysUnreserve(unsafe.Pointer(p), size+align)
+		p = alignUp(p, align)
+		p2 := sysReserve(unsafe.Pointer(p), size, vmaName)
+		if p != uintptr(p2) {
+			// Must have raced. Try again.
+			sysUnreserve(p2, size)
+			if retries++; retries == 100 {
+				throw("failed to allocate aligned heap memory; too many retries")
+			}
+			goto retry
+		}
+		// Success.
+		return p2, size
+	default:
+		// Trim off the unaligned parts.
+		pAligned := alignUp(p, align)
+		end := pAligned + size
+		endLen := (p + size + align) - end
+
+		// sysUnreserve does not allow unreserving a subset of the
+		// region because LSAN does not allow unregistering a subset.
+		// So we can't call sysUnreserve. Instead we simply unregister
+		// the entire region from LSAN and re-register with the smaller
+		// region before freeing the unecessary portions, which does
+		// allow subsets of the region.
+		if asanenabled {
+			lsanunregisterrootregion(unsafe.Pointer(p), size+align)
+			lsanregisterrootregion(unsafe.Pointer(pAligned), size)
+		}
+		sysFreeOS(unsafe.Pointer(p), pAligned-p)
+		if endLen > 0 {
+			sysFreeOS(unsafe.Pointer(end), endLen)
+		}
+		return unsafe.Pointer(pAligned), size
+	}
+}
+
+// sysUnreserve transitions a memory region from Reserved to None.
+//
+// The size and start address must exactly match the size and returned address
+// from sysReserve/sysReserveAligned. That is, sysUnreserve cannot be used to
+// unreserve a subset of a memory region.
+//
+// Don't split the stack as this function may be invoked without a valid G,
+// which prevents us from allocating more stack.
+//
+//go:nosplit
+func sysUnreserve(v unsafe.Pointer, n uintptr) {
+	// When using ASAN leak detection, the memory being freed is known by
+	// the sanitizer. We need to unregister it so it's not accessed by it.
+	//
+	// lsanunregisterrootregion matches regions by start address and size,
+	// so it is not possible to unregister a subset of the region. This is
+	// why sysUnreserve requires the full region from sysReserve.
+	if asanenabled {
+		lsanunregisterrootregion(v, n)
+	}
+
+	sysFreeOS(v, n)
 }
 
 // sysMap transitions a memory region from Reserved to Prepared. It ensures the
 // memory region can be efficiently transitioned to Ready.
 //
 // sysStat must be non-nil.
-func sysMap(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+func sysMap(v unsafe.Pointer, n uintptr, sysStat *sysMemStat, vmaName string) {
 	sysStat.add(int64(n))
-	sysMapOS(v, n)
+	sysMapOS(v, n, vmaName)
 }

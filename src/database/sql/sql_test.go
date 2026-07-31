@@ -1375,8 +1375,7 @@ func TestConnQuery(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1403,8 +1402,7 @@ func TestConnRaw(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1519,8 +1517,7 @@ func TestInvalidNilValues(t *testing.T) {
 			db := newTestDB(t, "people")
 			defer closeDB(t, db)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			conn, err := db.Conn(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -1548,8 +1545,7 @@ func TestConnTx(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2794,8 +2790,7 @@ func TestManyErrBadConn(t *testing.T) {
 	// Conn
 	db = manyErrBadConnSetup()
 	defer closeDB(t, db)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2936,8 +2931,7 @@ func TestConnExpiresFreshOutOfPool(t *testing.T) {
 	}
 	defer func() { nowFunc = time.Now }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	db := newTestDB(t, "magicquery")
 	defer closeDB(t, db)
@@ -2945,7 +2939,6 @@ func TestConnExpiresFreshOutOfPool(t *testing.T) {
 	db.SetMaxOpenConns(1)
 
 	for _, ec := range execCases {
-		ec := ec
 		name := fmt.Sprintf("expired=%t,badReset=%t", ec.expired, ec.badReset)
 		t.Run(name, func(t *testing.T) {
 			db.clearAllConns(t)
@@ -3787,8 +3780,7 @@ func TestIssue20647(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -4143,9 +4135,7 @@ func TestNamedValueChecker(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := t.Context()
 	_, err = db.ExecContext(ctx, "WIPE")
 	if err != nil {
 		t.Fatal("exec wipe", err)
@@ -4193,9 +4183,7 @@ func TestNamedValueCheckerSkip(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := t.Context()
 	_, err = db.ExecContext(ctx, "WIPE")
 	if err != nil {
 		t.Fatal("exec wipe", err)
@@ -4306,8 +4294,7 @@ func TestQueryExecContextOnly(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -5051,4 +5038,51 @@ func TestIssue69728(t *testing.T) {
 	if !reflect.DeepEqual(v1, v2) {
 		t.Errorf("not equal; v1 = %v, v2 = %v", v1, v2)
 	}
+}
+
+func TestColumnConverterWithUnknownInputCount(t *testing.T) {
+	db := OpenDB(&unknownInputsConnector{})
+	stmt, err := db.Prepare("SELECT ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = stmt.Exec(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type unknownInputsConnector struct{}
+
+func (unknownInputsConnector) Connect(context.Context) (driver.Conn, error) {
+	return unknownInputsConn{}, nil
+}
+
+func (unknownInputsConnector) Driver() driver.Driver { return nil }
+
+type unknownInputsConn struct{}
+
+func (unknownInputsConn) Prepare(string) (driver.Stmt, error) { return unknownInputsStmt{}, nil }
+func (unknownInputsConn) Close() error                        { return nil }
+func (unknownInputsConn) Begin() (driver.Tx, error)           { return nil, nil }
+
+type unknownInputsStmt struct{}
+
+func (unknownInputsStmt) Close() error  { return nil }
+func (unknownInputsStmt) NumInput() int { return -1 }
+func (unknownInputsStmt) Exec(args []driver.Value) (driver.Result, error) {
+	if _, ok := args[0].(string); !ok {
+		return nil, fmt.Errorf("Expected string, got %T", args[0])
+	}
+	return nil, nil
+}
+func (unknownInputsStmt) Query([]driver.Value) (driver.Rows, error) { return nil, nil }
+func (unknownInputsStmt) ColumnConverter(idx int) driver.ValueConverter {
+	return unknownInputsValueConverter{}
+}
+
+type unknownInputsValueConverter struct{}
+
+func (unknownInputsValueConverter) ConvertValue(v any) (driver.Value, error) {
+	return "string", nil
 }

@@ -28,14 +28,25 @@ const (
 	newtonSHA256 = "d4a9ac22462b35e7821a4f2706c211093da678620a8f9997989ee7cf8d507bbd"
 )
 
+func hookSupportsSendfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		origHook := testHookSupportsSendfile
+		testHookSupportsSendfile = func() bool { return true }
+		t.Cleanup(func() {
+			testHookSupportsSendfile = origHook
+		})
+	}
+}
+
 // expectSendfile runs f, and verifies that internal/poll.SendFile successfully handles
 // a write to wantConn during f's execution.
 //
-// On platforms where supportsSendfile is false, expectSendfile runs f but does not
+// On platforms where supportsSendfile() is false, expectSendfile runs f but does not
 // expect a call to SendFile.
 func expectSendfile(t *testing.T, wantConn Conn, f func()) {
 	t.Helper()
-	if !supportsSendfile {
+	hookSupportsSendfile(t)
+	if !supportsSendfile() {
 		f()
 		return
 	}
@@ -49,7 +60,7 @@ func expectSendfile(t *testing.T, wantConn Conn, f func()) {
 		gotFD      *poll.FD
 		gotErr     error
 	)
-	poll.TestHookDidSendFile = func(dstFD *poll.FD, src int, written int64, err error, handled bool) {
+	poll.TestHookDidSendFile = func(dstFD *poll.FD, src uintptr, written int64, err error, handled bool) {
 		if called {
 			t.Error("internal/poll.SendFile called multiple times, want one call")
 		}
@@ -126,23 +137,16 @@ func testSendfile(t *testing.T, filePath, fileHash string, size, limit int64) {
 			// Return file data using io.Copy, which should use
 			// sendFile if available.
 			var sbytes int64
-			switch runtime.GOOS {
-			case "windows":
-				// Windows is not using sendfile for some reason:
-				// https://go.dev/issue/67042
-				sbytes, err = io.Copy(conn, f)
-			default:
-				expectSendfile(t, conn, func() {
-					if limit > 0 {
-						sbytes, err = io.CopyN(conn, f, limit)
-						if err == io.EOF && limit > size {
-							err = nil
-						}
-					} else {
-						sbytes, err = io.Copy(conn, f)
+			expectSendfile(t, conn, func() {
+				if limit > 0 {
+					sbytes, err = io.CopyN(conn, f, limit)
+					if err == io.EOF && limit > size {
+						err = nil
 					}
-				})
-			}
+				} else {
+					sbytes, err = io.Copy(conn, f)
+				}
+			})
 			if err != nil {
 				errc <- err
 				return

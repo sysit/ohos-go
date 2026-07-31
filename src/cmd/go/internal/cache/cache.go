@@ -59,7 +59,7 @@ type Cache interface {
 	// background cleanup work started earlier. Any cache trimming in one
 	// process should not cause the invariants of this interface to be
 	// violated in another process. Namely, a cache trim from one process should
-	// not delete an ObjectID from disk that was recently Get or Put from
+	// not delete an OutputID from disk that was recently Get or Put from
 	// another process. As a rule of thumb, don't trim things used in the last
 	// day.
 	Close() error
@@ -296,6 +296,10 @@ func GetBytes(c Cache, id ActionID) ([]byte, Entry, error) {
 // GetMmap looks up the action ID in the cache and returns
 // the corresponding output bytes.
 // GetMmap should only be used for data that can be expected to fit in memory.
+// The boolean result indicates whether the file was opened.
+// If it is true, the caller should avoid attempting
+// to write to the file on Windows, because Windows locks
+// the open file, and writes to it will fail.
 func GetMmap(c Cache, id ActionID) ([]byte, Entry, bool, error) {
 	entry, err := c.Get(id)
 	if err != nil {
@@ -381,13 +385,42 @@ func (c *DiskCache) Trim() error {
 	// trim time is too far in the future, attempt the trim anyway. It's possible that
 	// the cache was full when the corruption happened. Attempting a trim on
 	// an empty cache is cheap, so there wouldn't be a big performance hit in that case.
-	if data, err := lockedfile.Read(filepath.Join(c.dir, "trim.txt")); err == nil {
+	skipTrim := func(data []byte) bool {
 		if t, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
 			lastTrim := time.Unix(t, 0)
 			if d := now.Sub(lastTrim); d < trimInterval && d > -mtimeInterval {
-				return nil
+				return true
 			}
 		}
+		return false
+	}
+	// Check to see if we need a trim. Do this check separately from the lockedfile.Transform
+	// so that we can skip getting an exclusive lock in the common case.
+	if data, err := lockedfile.Read(filepath.Join(c.dir, "trim.txt")); err == nil {
+		if skipTrim(data) {
+			return nil
+		}
+	}
+
+	errFileChanged := errors.New("file changed")
+
+	// Write the new timestamp before we start trimming to reduce the chance that multiple invocations
+	// try to trim at the same time, causing contention in CI (#76314).
+	err := lockedfile.Transform(filepath.Join(c.dir, "trim.txt"), func(data []byte) ([]byte, error) {
+		if skipTrim(data) {
+			// The timestamp in the file no longer meets the criteria for us to
+			// do a trim. It must have been updated by another go command invocation
+			// since we last read it. Skip the trim.
+			return nil, errFileChanged
+		}
+		return fmt.Appendf(nil, "%d", now.Unix()), nil
+	})
+	if errors.Is(err, errors.ErrUnsupported) {
+		return err
+	}
+	if errors.Is(err, errFileChanged) {
+		// Skip the trim because we don't need it anymore.
+		return nil
 	}
 
 	// Trim each of the 256 subdirectories.
@@ -397,14 +430,6 @@ func (c *DiskCache) Trim() error {
 	for i := 0; i < 256; i++ {
 		subdir := filepath.Join(c.dir, fmt.Sprintf("%02x", i))
 		c.trimSubdir(subdir, cutoff)
-	}
-
-	// Ignore errors from here: if we don't write the complete timestamp, the
-	// cache will appear older than it is, and we'll trim it again next time.
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "%d", now.Unix())
-	if err := lockedfile.Write(filepath.Join(c.dir, "trim.txt"), &b, 0o666); err != nil {
-		return err
 	}
 
 	return nil

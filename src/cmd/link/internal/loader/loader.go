@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"internal/abi"
 	"io"
+	"iter"
 	"log"
 	"math/bits"
 	"os"
@@ -242,6 +243,7 @@ type Loader struct {
 	plt         map[Sym]int32       // stores dynimport for pe objects
 	got         map[Sym]int32       // stores got for pe objects
 	dynid       map[Sym]int32       // stores Dynid for symbol
+	weakBinding map[Sym]bool        // stores whether a symbol has a weak binding
 
 	relocVariant map[relocId]sym.RelocVariant // stores variant relocs
 
@@ -327,6 +329,7 @@ func NewLoader(flags uint32, reporter *ErrorReporter) *Loader {
 		plt:                  make(map[Sym]int32),
 		got:                  make(map[Sym]int32),
 		dynid:                make(map[Sym]int32),
+		weakBinding:          make(map[Sym]bool),
 		attrCgoExportDynamic: make(map[Sym]struct{}),
 		attrCgoExportStatic:  make(map[Sym]struct{}),
 		deferReturnTramp:     make(map[Sym]bool),
@@ -817,7 +820,7 @@ func (l *Loader) SymVersion(i Sym) int {
 		return pp.ver
 	}
 	r, li := l.toLocal(i)
-	return int(abiToVer(r.Sym(li).ABI(), r.version))
+	return abiToVer(r.Sym(li).ABI(), r.version)
 }
 
 func (l *Loader) IsFileLocal(i Sym) bool {
@@ -1121,6 +1124,18 @@ func (l *Loader) SetAttrCgoExportStatic(i Sym, v bool) {
 	}
 }
 
+// ForAllCgoExportStatic returns an iterator over all symbols
+// marked with the "cgo_export_static" compiler directive.
+func (l *Loader) ForAllCgoExportStatic() iter.Seq[Sym] {
+	return func(yield func(Sym) bool) {
+		for s := range l.attrCgoExportStatic {
+			if !yield(s) {
+				break
+			}
+		}
+	}
+}
+
 // IsGeneratedSym returns true if a symbol's been previously marked as a
 // generator symbol through the SetIsGeneratedSym. The functions for generator
 // symbols are kept in the Link context.
@@ -1350,9 +1365,6 @@ func (l *Loader) SetSymAlign(i Sym, align int32) {
 	if int(i) >= len(l.align) {
 		l.align = append(l.align, make([]uint8, l.NSym()-len(l.align))...)
 	}
-	if align == 0 {
-		l.align[i] = 0
-	}
 	l.align[i] = uint8(bits.Len32(uint32(align)))
 }
 
@@ -1447,6 +1459,18 @@ func (l *Loader) SetSymExtname(i Sym, value string) {
 	} else {
 		l.extname[i] = value
 	}
+}
+
+func (l *Loader) SymWeakBinding(i Sym) bool {
+	return l.weakBinding[i]
+}
+
+func (l *Loader) SetSymWeakBinding(i Sym, v bool) {
+	// reject bad symbols
+	if i >= Sym(len(l.objSyms)) || i == 0 {
+		panic("bad symbol index in SetSymWeakBinding")
+	}
+	l.weakBinding[i] = v
 }
 
 // SymElfType returns the previously recorded ELF type for a symbol
@@ -1769,14 +1793,6 @@ func (l *Loader) GetVarDwarfAuxSym(i Sym) Sym {
 // expected to have the actual content/payload) and then a set of
 // interior loader.Sym's that point into a portion of the container.
 func (l *Loader) AddInteriorSym(container Sym, interior Sym) {
-	// Container symbols are expected to have content/data.
-	// NB: this restriction may turn out to be too strict (it's possible
-	// to imagine a zero-sized container with an interior symbol pointing
-	// into it); it's ok to relax or remove it if we counter an
-	// oddball host object that triggers this.
-	if l.SymSize(container) == 0 && len(l.Data(container)) == 0 {
-		panic("unexpected empty container symbol")
-	}
 	// The interior symbols for a container are not expected to have
 	// content/data or relocations.
 	if len(l.Data(interior)) != 0 {
@@ -2318,16 +2334,16 @@ func (l *Loader) LoadSyms(arch *sys.Arch) {
 		st.preloadSyms(r, hashedDef)
 		st.preloadSyms(r, nonPkgDef)
 	}
-	for _, sf := range l.sizeFixups {
-		pp := l.cloneToExternal(sf.sym)
-		pp.size = int64(sf.size)
-	}
 	for _, vr := range st.linknameVarRefs {
 		l.checkLinkname(vr.pkg, vr.name, vr.sym)
 	}
 	l.nhashedsyms = len(st.hashed64Syms) + len(st.hashedSyms)
 	for _, r := range l.objs[goObjStart:] {
 		loadObjRefs(l, r, arch)
+	}
+	for _, sf := range l.sizeFixups {
+		pp := l.cloneToExternal(sf.sym)
+		pp.size = int64(sf.size)
 	}
 	l.values = make([]int64, l.NSym(), l.NSym()+1000) // +1000 make some room for external symbols
 	l.outer = make([]Sym, l.NSym(), l.NSym()+1000)
@@ -2414,9 +2430,9 @@ var blockedLinknames = map[string][]string{
 	"crypto/rand.fatal":                     {"crypto/rand"},
 	"internal/runtime/maps.errNilAssign":    {"internal/runtime/maps"},
 	"internal/runtime/maps.fatal":           {"internal/runtime/maps"},
-	"internal/runtime/maps.mapKeyError":     {"internal/runtime/maps"},
 	"internal/runtime/maps.newarray":        {"internal/runtime/maps"},
 	"internal/runtime/maps.newobject":       {"internal/runtime/maps"},
+	"internal/runtime/maps.rand":            {"internal/runtime/maps"},
 	"internal/runtime/maps.typedmemclr":     {"internal/runtime/maps"},
 	"internal/runtime/maps.typedmemmove":    {"internal/runtime/maps"},
 	"internal/sync.fatal":                   {"internal/sync"},
@@ -2444,6 +2460,48 @@ var blockedLinknames = map[string][]string{
 	"runtime.mapdelete_fast32":   {"runtime"},
 	"runtime.mapdelete_fast64":   {"runtime"},
 	"runtime.mapdelete_faststr":  {"runtime"},
+	// New internal linknames in Go 1.25
+	// Pushed from runtime
+	"internal/cpu.riscvHWProbe":                      {"internal/cpu"},
+	"internal/runtime/cgroup.throw":                  {"internal/runtime/cgroup"},
+	"internal/runtime/maps.typeString":               {"internal/runtime/maps"},
+	"internal/synctest.IsInBubble":                   {"internal/synctest"},
+	"internal/synctest.associate":                    {"internal/synctest"},
+	"internal/synctest.disassociate":                 {"internal/synctest"},
+	"internal/synctest.isAssociated":                 {"internal/synctest"},
+	"runtime/trace.runtime_readTrace":                {"runtime/trace"},
+	"runtime/trace.runtime_traceClockUnitsPerSecond": {"runtime/trace"},
+	"sync_test.runtime_blockUntilEmptyCleanupQueue":  {"sync_test"},
+	"time.runtimeIsBubbled":                          {"time"},
+	"unique.runtime_blockUntilEmptyCleanupQueue":     {"unique"},
+	// Others
+	"net.newWindowsFile":                   {"net"},              // pushed from os
+	"testing/synctest.testingSynctestTest": {"testing/synctest"}, // pushed from testing
+	// New internal linknames in Go 1.26
+	// Pushed from runtime
+	"crypto/fips140.isBypassed":                    {"crypto/fips140"},
+	"crypto/fips140.setBypass":                     {"crypto/fips140"},
+	"crypto/fips140.unsetBypass":                   {"crypto/fips140"},
+	"crypto/subtle.setDITEnabled":                  {"crypto/subtle"},
+	"crypto/subtle.setDITDisabled":                 {"crypto/subtle"},
+	"internal/cpu.sysctlbynameBytes":               {"internal/cpu"},
+	"internal/cpu.sysctlbynameInt32":               {"internal/cpu"},
+	"runtime.pprof_goroutineLeakProfileWithLabels": {"runtime/pprof"},
+	"runtime/pprof.runtime_goroutineLeakGC":        {"runtime/pprof"},
+	"runtime/pprof.runtime_goroutineleakcount":     {"runtime/pprof"},
+	"runtime/secret.appendSignalStacks":            {"runtime/secret"},
+	"runtime/secret.count":                         {"runtime/secret"},
+	"runtime/secret.dec":                           {"runtime/secret"},
+	"runtime/secret.eraseSecrets":                  {"runtime/secret"},
+	"runtime/secret.getStack":                      {"runtime/secret"},
+	"runtime/secret.inc":                           {"runtime/secret"},
+	"syscall.rawsyscalln":                          {"syscall"},
+	"syscall.runtimeClearenv":                      {"syscall"},
+	"syscall.syscalln":                             {"syscall"},
+	// Others
+	"crypto/internal/rand.SetTestingReader": {"testing/cryptotest"}, // pushed from crypto/internal/rand
+	"testing.checkParallel":                 {"testing/cryptotest"}, // pushed from testing
+	"runtime.addmoduledata":                 {},                     // assembly symbol, disallow all packages
 }
 
 // check if a linkname reference to symbol s from pkg is allowed
@@ -2738,15 +2796,15 @@ func (l *Loader) AssignTextSymbolOrder(libs []*sym.Library, intlibs []bool, exts
 				// We still need to record its presence in the current
 				// package, as the trampoline pass expects packages
 				// are laid out in dependency order.
-				lib.DupTextSyms = append(lib.DupTextSyms, sym.LoaderSym(gi))
+				lib.DupTextSyms = append(lib.DupTextSyms, gi)
 				continue // symbol in different object
 			}
 			if dupok {
-				lib.DupTextSyms = append(lib.DupTextSyms, sym.LoaderSym(gi))
+				lib.DupTextSyms = append(lib.DupTextSyms, gi)
 				continue
 			}
 
-			lib.Textp = append(lib.Textp, sym.LoaderSym(gi))
+			lib.Textp = append(lib.Textp, gi)
 		}
 	}
 
@@ -2759,7 +2817,7 @@ func (l *Loader) AssignTextSymbolOrder(libs []*sym.Library, intlibs []bool, exts
 			lists := [2][]sym.LoaderSym{lib.Textp, lib.DupTextSyms}
 			for i, list := range lists {
 				for _, s := range list {
-					sym := Sym(s)
+					sym := s
 					if !assignedToUnit.Has(sym) {
 						textp = append(textp, sym)
 						unit := l.SymUnit(sym)
@@ -2800,11 +2858,11 @@ type ErrorReporter struct {
 //
 // Logging an error means that on exit cmd/link will delete any
 // output file and return a non-zero error code.
-func (reporter *ErrorReporter) Errorf(s Sym, format string, args ...interface{}) {
+func (reporter *ErrorReporter) Errorf(s Sym, format string, args ...any) {
 	if s != 0 && reporter.ldr.SymName(s) != "" {
 		// Note: Replace is needed here because symbol names might have % in them,
 		// due to the use of LinkString for names of instantiating types.
-		format = strings.Replace(reporter.ldr.SymName(s), "%", "%%", -1) + ": " + format
+		format = strings.ReplaceAll(reporter.ldr.SymName(s), "%", "%%") + ": " + format
 	} else {
 		format = fmt.Sprintf("sym %d: %s", s, format)
 	}
@@ -2819,7 +2877,7 @@ func (l *Loader) GetErrorReporter() *ErrorReporter {
 }
 
 // Errorf method logs an error message. See ErrorReporter.Errorf for details.
-func (l *Loader) Errorf(s Sym, format string, args ...interface{}) {
+func (l *Loader) Errorf(s Sym, format string, args ...any) {
 	l.errorReporter.Errorf(s, format, args...)
 }
 

@@ -1060,7 +1060,7 @@ func (w *Walker) emitIfaceType(name string, typ *types.Interface) {
 		if w.isDeprecated(m) {
 			w.emitf("%s //deprecated", m.Name())
 		}
-		w.emitf("%s%s", m.Name(), w.signatureString(m.Type().(*types.Signature)))
+		w.emitf("%s%s", m.Name(), w.signatureString(m.Signature()))
 	}
 
 	if !complete {
@@ -1090,7 +1090,7 @@ func (w *Walker) emitIfaceType(name string, typ *types.Interface) {
 }
 
 func (w *Walker) emitFunc(f *types.Func) {
-	sig := f.Type().(*types.Signature)
+	sig := f.Signature()
 	if sig.Recv() != nil {
 		panic("method considered a regular function: " + f.String())
 	}

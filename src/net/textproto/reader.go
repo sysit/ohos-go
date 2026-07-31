@@ -110,11 +110,12 @@ func trim(s []byte) []byte {
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
 	}
-	n := len(s)
-	for n > i && (s[n-1] == ' ' || s[n-1] == '\t') {
+	s = s[i:]
+	n := len(s) - 1
+	for n >= 0 && (s[n] == ' ' || s[n] == '\t') {
 		n--
 	}
-	return s[i:n]
+	return s[:n+1]
 }
 
 // ReadContinuedLineBytes is like [Reader.ReadContinuedLine] but
@@ -214,13 +215,13 @@ func (r *Reader) readCodeLine(expectCode int) (code int, continued bool, message
 
 func parseCodeLine(line string, expectCode int) (code int, continued bool, message string, err error) {
 	if len(line) < 4 || line[3] != ' ' && line[3] != '-' {
-		err = ProtocolError("short response: " + line)
+		err = ProtocolError(fmt.Sprintf("short response: %q", line))
 		return
 	}
 	continued = line[3] == '-'
 	code, err = strconv.Atoi(line[0:3])
 	if err != nil || code < 100 {
-		err = ProtocolError("invalid response code: " + line)
+		err = ProtocolError(fmt.Sprintf("invalid response code: %q", line))
 		return
 	}
 	message = line[4:]
@@ -252,7 +253,7 @@ func parseCodeLine(line string, expectCode int) (code int, continued bool, messa
 func (r *Reader) ReadCodeLine(expectCode int) (code int, message string, err error) {
 	code, continued, message, err := r.readCodeLine(expectCode)
 	if err == nil && continued {
-		err = ProtocolError("unexpected multi-line response: " + message)
+		err = ProtocolError(fmt.Sprintf("unexpected multi-line response: %q", message))
 	}
 	return
 }
@@ -540,7 +541,7 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 		if err != nil {
 			return m, err
 		}
-		return m, ProtocolError("malformed MIME header initial line: " + string(line))
+		return m, ProtocolError(fmt.Sprintf("malformed MIME header initial line: %q", line))
 	}
 
 	for {
@@ -552,15 +553,15 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 		// Key ends at first colon.
 		k, v, ok := bytes.Cut(kv, colon)
 		if !ok {
-			return m, ProtocolError("malformed MIME header line: " + string(kv))
+			return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 		}
 		key, ok := canonicalMIMEHeaderKey(k)
 		if !ok {
-			return m, ProtocolError("malformed MIME header line: " + string(kv))
+			return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 		}
 		for _, c := range v {
 			if !validHeaderValueByte(c) {
-				return m, ProtocolError("malformed MIME header line: " + string(kv))
+				return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 			}
 		}
 
@@ -647,8 +648,8 @@ func (r *Reader) upcomingHeaderKeys() (n int) {
 // the rest are converted to lowercase. For example, the
 // canonical key for "accept-encoding" is "Accept-Encoding".
 // MIME header keys are assumed to be ASCII only.
-// If s contains a space or invalid header field bytes, it is
-// returned without modifications.
+// If s contains a space or invalid header field bytes as
+// defined by RFC 9112, it is returned without modifications.
 func CanonicalMIMEHeaderKey(s string) string {
 	// Quick check for canonical encoding.
 	upper := true

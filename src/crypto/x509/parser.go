@@ -10,13 +10,13 @@ import (
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
 	"fmt"
 	"internal/godebug"
+	"math"
 	"math/big"
 	"net"
 	"net/url"
@@ -60,7 +60,21 @@ func isPrintable(b byte) bool {
 func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
 	switch tag {
 	case cryptobyte_asn1.T61String:
-		return string(value), nil
+		// T.61 is a defunct ITU 8-bit character encoding which preceded Unicode.
+		// T.61 uses a code page layout that _almost_ exactly maps to the code
+		// page layout of the ISO 8859-1 (Latin-1) character encoding, with the
+		// exception that a number of characters in Latin-1 are not present
+		// in T.61.
+		//
+		// Instead of mapping which characters are present in Latin-1 but not T.61,
+		// we just treat these strings as being encoded using Latin-1. This matches
+		// what most of the world does, including BoringSSL.
+		buf := make([]byte, 0, len(value))
+		for _, v := range value {
+			// All the 1-byte UTF-8 runes map 1-1 with Latin-1.
+			buf = utf8.AppendRune(buf, rune(v))
+		}
+		return string(buf), nil
 	case cryptobyte_asn1.PrintableString:
 		for _, b := range value {
 			if !isPrintable(b) {
@@ -74,6 +88,14 @@ func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
 		}
 		return string(value), nil
 	case cryptobyte_asn1.Tag(asn1.TagBMPString):
+		// BMPString uses the defunct UCS-2 16-bit character encoding, which
+		// covers the Basic Multilingual Plane (BMP). UTF-16 was an extension of
+		// UCS-2, containing all of the same code points, but also including
+		// multi-code point characters (by using surrogate code points). We can
+		// treat a UCS-2 encoded string as a UTF-16 encoded string, as long as
+		// we reject out the UTF-16 specific code points. This matches the
+		// BoringSSL behavior.
+
 		if len(value)%2 != 0 {
 			return "", errors.New("invalid BMPString")
 		}
@@ -85,7 +107,16 @@ func parseASN1String(tag cryptobyte_asn1.Tag, value []byte) (string, error) {
 
 		s := make([]uint16, 0, len(value)/2)
 		for len(value) > 0 {
-			s = append(s, uint16(value[0])<<8+uint16(value[1]))
+			point := uint16(value[0])<<8 + uint16(value[1])
+			// Reject UTF-16 code points that are permanently reserved
+			// noncharacters (0xfffe, 0xffff, and 0xfdd0-0xfdef) and surrogates
+			// (0xd800-0xdfff).
+			if point == 0xfffe || point == 0xffff ||
+				(point >= 0xfdd0 && point <= 0xfdef) ||
+				(point >= 0xd800 && point <= 0xdfff) {
+				return "", errors.New("invalid BMPString")
+			}
+			s = append(s, point)
 			value = value[2:]
 		}
 
@@ -218,7 +249,7 @@ func parseExtension(der cryptobyte.String) (pkix.Extension, error) {
 func parsePublicKey(keyData *publicKeyInfo) (any, error) {
 	oid := keyData.Algorithm.Algorithm
 	params := keyData.Algorithm.Parameters
-	der := cryptobyte.String(keyData.PublicKey.RightAlign())
+	data := keyData.PublicKey.RightAlign()
 	switch {
 	case oid.Equal(oidPublicKeyRSA):
 		// RSA public keys must have a NULL in the parameters.
@@ -227,6 +258,7 @@ func parsePublicKey(keyData *publicKeyInfo) (any, error) {
 			return nil, errors.New("x509: RSA key missing NULL parameters")
 		}
 
+		der := cryptobyte.String(data)
 		p := &pkcs1PublicKey{N: new(big.Int)}
 		if !der.ReadASN1(&der, cryptobyte_asn1.SEQUENCE) {
 			return nil, errors.New("x509: invalid RSA public key")
@@ -260,34 +292,26 @@ func parsePublicKey(keyData *publicKeyInfo) (any, error) {
 		if namedCurve == nil {
 			return nil, errors.New("x509: unsupported elliptic curve")
 		}
-		x, y := elliptic.Unmarshal(namedCurve, der)
-		if x == nil {
-			return nil, errors.New("x509: failed to unmarshal elliptic curve point")
-		}
-		pub := &ecdsa.PublicKey{
-			Curve: namedCurve,
-			X:     x,
-			Y:     y,
-		}
-		return pub, nil
+		return ecdsa.ParseUncompressedPublicKey(namedCurve, data)
 	case oid.Equal(oidPublicKeyEd25519):
 		// RFC 8410, Section 3
 		// > For all of the OIDs, the parameters MUST be absent.
 		if len(params.FullBytes) != 0 {
 			return nil, errors.New("x509: Ed25519 key encoded with illegal parameters")
 		}
-		if len(der) != ed25519.PublicKeySize {
+		if len(data) != ed25519.PublicKeySize {
 			return nil, errors.New("x509: wrong Ed25519 public key size")
 		}
-		return ed25519.PublicKey(der), nil
+		return ed25519.PublicKey(data), nil
 	case oid.Equal(oidPublicKeyX25519):
 		// RFC 8410, Section 3
 		// > For all of the OIDs, the parameters MUST be absent.
 		if len(params.FullBytes) != 0 {
 			return nil, errors.New("x509: X25519 key encoded with illegal parameters")
 		}
-		return ecdh.X25519().NewPublicKey(der)
+		return ecdh.X25519().NewPublicKey(data)
 	case oid.Equal(oidPublicKeyDSA):
+		der := cryptobyte.String(data)
 		y := new(big.Int)
 		if !der.ReadASN1Integer(y) {
 			return nil, errors.New("x509: invalid DSA public key")
@@ -342,14 +366,16 @@ func parseBasicConstraintsExtension(der cryptobyte.String) (bool, int, error) {
 			return false, 0, errors.New("x509: invalid basic constraints")
 		}
 	}
+
 	maxPathLen := -1
 	if der.PeekASN1Tag(cryptobyte_asn1.INTEGER) {
-		if !der.ReadASN1Integer(&maxPathLen) {
+		var mpl uint
+		if !der.ReadASN1Integer(&mpl) || mpl > math.MaxInt {
 			return false, 0, errors.New("x509: invalid basic constraints")
 		}
+		maxPathLen = int(mpl)
 	}
 
-	// TODO: map out.MaxPathLen to 0 if it has the -1 default value? (Issue 19285)
 	return isCA, maxPathLen, nil
 }
 
@@ -1055,7 +1081,7 @@ func ParseCertificate(der []byte) (*Certificate, error) {
 	if len(der) != len(cert.Raw) {
 		return nil, errors.New("x509: trailing data")
 	}
-	return cert, err
+	return cert, nil
 }
 
 // ParseCertificates parses one or more certificates from the given ASN.1 DER
