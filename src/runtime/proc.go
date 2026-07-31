@@ -800,13 +800,22 @@ func getGodebugEarly() (string, bool) {
 		// TODO(moehrmann): remove when general goenvs() can be called before cpuinit()
 
 		// If the binary is an archive or a library, the operating system is Linux,
-		// and the system uses Musl, then read the environment variables from the
-		// /proc/self/environ file. Iterate over each null-terminated string read
-		// from the file. If any string has the specified prefix, return that string.
+		// and the system uses Musl, then the environment is not reachable via
+		// argv (the loader does not populate auxv/envp for a dlopen'ed library).
+		// libpreinit captures the C environ pointer instead. Scan it directly:
+		// getGodebugEarly runs before mallocinit, so it must not allocate
+		// (reading /proc/self/environ would require the allocator).
 		if libmusl {
-			for _, value := range readNullTerminatedStringsFromFile(procEnviron) {
-				if stringslite.HasPrefix(value, prefix) {
-					return value, true
+			if muslEnviron != nil {
+				for i := int32(0); ; i++ {
+					p := argv_index(muslEnviron, i)
+					if p == nil {
+						break
+					}
+					s := unsafe.String(p, findnull(p))
+					if stringslite.HasPrefix(s, prefix) {
+						return gostringnocopy(p)[len(prefix):], true
+					}
 				}
 			}
 			return env, false
