@@ -511,7 +511,7 @@ var optab = []Optab{
 	{AMOVD, C_GOTADDR, C_NONE, C_NONE, C_ZREG, C_NONE, 71, 8, 0, 0, 0},
 	{AMOVD, C_TLS_LE, C_NONE, C_NONE, C_ZREG, C_NONE, 69, 4, 0, 0, 0},
 	{AMOVD, C_TLS_IE, C_NONE, C_NONE, C_ZREG, C_NONE, 70, 8, 0, 0, 0},
-	{AMOVD, C_TLS_GD, C_NONE, C_NONE, C_ZREG, C_NONE, 109, 16, 0, 0, 0},
+	{AMOVD, C_TLS_GD, C_NONE, C_NONE, C_ZREG, C_NONE, 101, 16, 0, 0, 0},
 
 	{AFMOVS, C_FREG, C_NONE, C_NONE, C_ADDR, C_NONE, 64, 12, 0, 0, 0},
 	{AFMOVS, C_ADDR, C_NONE, C_NONE, C_FREG, C_NONE, 65, 12, 0, 0, 0},
@@ -4860,7 +4860,7 @@ func (c *ctxt7) asmout(p *obj.Prog, out []uint32) (count int) {
 			c.ctxt.Diag("invalid offset on MOVW $tlsvar")
 		}
 
-	case 109: /* GD model movd $tlsvar, reg -> adrp reg, #0; ldr REGTMP, [reg, #0]; add reg, reg, #0; blr REGTMP + relocs */
+	case 101: /* GD model movd $tlsvar, reg -> adrp reg, #0; ldr REGTMP, [reg, #0]; add reg, reg, #0; blr REGTMP + relocs */
 		o1 = ADR(1, 0, uint32(p.To.Reg))
 		o2 = c.olsr12u(p, c.opldr(p, AMOVD), 0, p.To.Reg, REGTMP)
 		o3 = c.opirr(p, AADD)
