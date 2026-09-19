@@ -1722,6 +1722,10 @@ func wrapperPathFor(goos, goarch string) string {
 		if gohostos != "ios" {
 			return pathf("%s/misc/ios/go_ios_exec.go", goroot)
 		}
+	case goos == "openharmony":
+		if gohostos != "openharmony" {
+			return pathf("%s/misc/go_openharmony_exec/main.go", goroot)
+		}
 	}
 	return ""
 }
