@@ -99,6 +99,8 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | 共享库 GC 数据 | `cmd/link/internal/ld/decodesym.go` 的 `decodetypeGcprogShlibByReloc` |
 | 测试标签 | `testing/benchmark.go` 的 goos 打印、`crash_cgo_test.go` 的 openharmony case |
 | 链接器跳过 | `cmd/link/link_test.go`（race detector skip `|| runtime.IsOpenharmony`） |
+| 默认 PIE | `internal/platform/supported.go` 的 `DefaultPIE`（`case "android", "ios", "openharmony"`）——去掉它，cgo 可执行文件就会退回 `Signal 11` |
+| ELF 解释器 | `cmd/link/internal/ld/elf.go` 的 `case objabi.Hlinux`（openharmony → 直接用 `LinuxdynldMusl`，**不做宿主探测**） |
 
 ### 4.2 能力实测结论（2026-09，go1.27.1）
 
@@ -112,14 +114,18 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | `c-shared` | ✅ 可用 | `dlopen(RTLD_NOW)`+`dlsym` 与链接期 `-ladd` 两条路都 → 42 |
 | `plugin` | ✅ 可用 | `plug.so` + PIE 宿主 `plugin.Open`→`Lookup` → 42 |
 | `shared` | ✅ 可用 | `libstd.so`（74 MB）+ `LD_LIBRARY_PATH` → `-linkshared` 宿主打印 42 |
-| **cgo 可执行文件** | ⚠️ **必须 `-buildmode=pie`** | 默认 buildmode 下任何 `import "C"` 的程序在 `init()` 之前 `Signal 11`（exit 139）；`-buildmode=pie` 即正常。两者都是 ELF `DYN`+`PIE`，差别在 codegen/链接标志，不在容器格式。最小复现：`misc/openharmony/cgomin` |
-| `-asan` | ✅ 可用（须配 `-buildmode=pie`） | 设备上打印 `ERROR: AddressSanitizer: heap-buffer-overflow` + `0 bytes to the right of 4-byte region` |
+| **cgo 可执行文件** | ✅ 默认即可（无需再加 `-buildmode=pie`） | 2026-09 起 `platform.DefaultPIE` 对 openharmony 返回 true，默认 buildmode 本身就产出可运行的 PIE。改之前默认 buildmode 下任何 `import "C"` 的程序在 `init()` 之前 `Signal 11`（exit 139）。最小复现：`misc/openharmony/cgomin` |
+| `-asan` | ✅ 可用（需 PIE，默认 buildmode 现已满足） | 设备上打印 `ERROR: AddressSanitizer: heap-buffer-overflow` + `0 bytes to the right of 4-byte region`；§7 的命令仍显式写 `-buildmode=pie`，无害 |
 | `-race` | ❌ 不可用（不开门） | TSAN 的 arm64 `InitializePlatformEarly` 硬要求 48 位 VMA（`cmp #48` / `b.ne` → `unsupported VMA range`），而设备用户地址空间只有 39 位：ASan 自报 `HighMem [0x002000000000, 0x007fffffffff]`，探针 `vma_bits_stack=38`。TSAN shadow 在 32 TiB（45 位）处，够不着。开了只会把构建期一句清楚报错换成运行期 sanitizer 崩溃 |
 | `-msan` | ❌ 不可行 | SDK 里 `libclang_rt.msan*` 为零，且 MSan 要求插桩过的 libc，OHOS musl 不是 → 每个 libc 调用都会假阳性。`MSanSupported` 的 `default: return false` 保持不动 |
 | SVE | ✅ 汇编器可用（需 `GOEXPERIMENT=simd`） | `ZADD Z7.D, Z23.D, Z13.D` 为 `openharmony/arm64` 编出 `04e702ed`，与上游 `arm64sveenc.s` 期望的 `ed02e704` 逐字节相符。硬件执行未验：shell uid 读不了 `/proc/cpuinfo` |
 | x509 系统根 | ❌ 外部进程取不到 | 探针报 `certpool: error: open /etc/ssl/certs: permission denied`——目录存在但 shell uid 无权限（`/etc/security`、`/system/etc/security` 同样 denied）。**正解是 `SSL_CERT_FILE`/`SSL_CERT_DIR`**（`root.go` 已尊重），故不加 `root_openharmony.go`，零 delta |
 | 真机执行 | ⚠️ 受限 | 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（`Permission denied`）。本轮所有设备侧结论出自模拟器 |
 | `-exec` 自动执行 | ✅ 可用 | `misc/go_openharmony_exec` 经 `go_<GOOS>_<GOARCH>_exec` 约定被 `go test` 自动发现：`GOOS=openharmony GOARCH=arm64 go test strings` → `ok strings 3.661s`。设备侧回程证据：`GOOS=linux GOARCH=arm64 IsOpenharmony=true`（**split identity 在运行中的设备进程里被观察到**），且故意失败的用例正确回传 `FAIL` + 非零退出码 |
+
+**为什么默认 PIE 还牵扯到解释器（两处必须同时存在）**
+
+只加 `DefaultPIE` 会把**纯 Go 可执行文件**一起变成 PIE，而内部链接的 PIE 要写 `PT_INTERP`：`elf.go` 原来的逻辑是 `interpreter = Linuxdynld`（glibc 路径），再 `os.Stat` 它——**那是宿主文件系统上的探测**，macOS 上两个 loader 都不存在，于是沿用了 glibc 路径 `/lib/ld-linux-aarch64.so.1`，而设备上只有 `/lib/ld-musl-aarch64.so.1` → `execve` 报 ENOENT（`/bin/sh: ...: No such file or directory`）。cgo 的可执行文件不受影响，因为它们走外部链接、由 clang 按 `--target` 自己选 musl loader。openharmony 是纯 musl 目标，没有可探测的余地，所以直接取 `LinuxdynldMusl`。
 
 两个必须记住的操作细节：
 

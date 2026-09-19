@@ -1830,6 +1830,13 @@ func asmbElf(ctxt *Link) {
 					if interpreter == "" {
 						Exitf("ELF interpreter not set")
 					}
+				} else if buildcfg.GOOS == "openharmony" {
+					// OpenHarmony is musl-only, so there is nothing to
+					// fall back to and no reason to look at the host.
+					interpreter = thearch.ELF.LinuxdynldMusl
+					if interpreter == "" {
+						Exitf("ELF interpreter not set")
+					}
 				} else {
 					interpreter = thearch.ELF.Linuxdynld
 					// If interpreter does not exist, try musl instead.

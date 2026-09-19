@@ -239,7 +239,15 @@ func InternalLinkPIESupported(goos, goarch string) bool {
 // so force the caller to pass that in to centralize that choice.
 func DefaultPIE(goos, goarch string, isRace bool) bool {
 	switch goos {
-	case "android", "ios":
+	case "android", "ios", "openharmony":
+		// OpenHarmony is here for a different reason than android and ios:
+		// a non-PIE cgo executable's "default" buildmode links with -no-pie,
+		// which freezes the TP-relative offset of runtime.tlsg at static link
+		// time, and the first TLS access faults before init runs. Making PIE
+		// the default means the offset comes from the dynamic linker instead,
+		// which is also what -buildmode=pie does by hand today. The alternative,
+		// -tls=GD in the default buildmode, is the model this port actually
+		// implements for c-archive/c-shared and is untested here.
 		return true
 	case "windows":
 		if isRace {
