@@ -52,6 +52,8 @@ func ASanSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
 		return goarch == "arm64" || goarch == "amd64" || goarch == "loong64" || goarch == "riscv64" || goarch == "ppc64le"
+	case "openharmony":
+		return goarch == "arm64"
 	default:
 		return false
 	}

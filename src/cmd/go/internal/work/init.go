@@ -406,10 +406,17 @@ func compilerVersion() (version, error) {
 	compiler.Once.Do(func() {
 		compiler.err = func() error {
 			compiler.name = "unknown"
-			cc := os.Getenv("CC")
-			cmd := exec.Command(cc, "--version")
-			cmd.Env = append(cmd.Environ(), "LANG=C")
-			out, err := cmd.Output()
+			// $(go env CC) may be a command line, not just a program name: the
+			// openharmony port needs "clang --target=... --sysroot=... -D__MUSL__",
+			// and any other cross toolchain needs the same. Split it the way the
+			// rest of this package does.
+			cc := envList("CC", cfg.DefaultCC(cfg.Goos, cfg.Goarch))
+			ccCmd := func(args ...string) *exec.Cmd {
+				cmd := exec.Command(cc[0], append(append([]string(nil), cc[1:]...), args...)...)
+				cmd.Env = append(cmd.Environ(), "LANG=C")
+				return cmd
+			}
+			out, err := ccCmd("--version").Output()
 			if err != nil {
 				// Compiler does not support "--version" flag: not Clang or GCC.
 				return err
@@ -418,9 +425,7 @@ func compilerVersion() (version, error) {
 			var match [][]byte
 			if bytes.HasPrefix(out, []byte("gcc")) {
 				compiler.name = "gcc"
-				cmd := exec.Command(cc, "-v")
-				cmd.Env = append(cmd.Environ(), "LANG=C")
-				out, err := cmd.CombinedOutput()
+				out, err := ccCmd("-v").CombinedOutput()
 				if err != nil {
 					// gcc, but does not support gcc's "-v" flag?!
 					return err
