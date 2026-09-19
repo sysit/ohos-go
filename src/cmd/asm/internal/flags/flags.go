@@ -27,6 +27,7 @@ var (
 	Importpath = flag.String("p", obj.UnlinkablePkg, "set expected package import to path")
 	Spectre    = flag.String("spectre", "", "enable spectre mitigations in `list` (all, ret)")
 	Tls        = flag.String("tls", "", "specifies tls model to use from `list` (LE, IE, GD)")
+	Std        = flag.Bool("std", false, "building standard library")
 )
 
 var DebugFlags struct {
