@@ -20,10 +20,24 @@ package main
 #include <stdlib.h>
 #include <stdio.h>
 
-// Declared by hand rather than via <sanitizer/asan_interface.h> so that the
-// un-instrumented control build compiles too.
-extern int __asan_address_is_poisoned(void const volatile *addr)
-	__attribute__((weak));
+// ASan's runtime only exists when the C is compiled with -fsanitize=address, so
+// the reference to it is gated on the compiler's own feature macro.
+//
+// A hand-declared __attribute__((weak)) symbol does NOT work for this: an
+// undefined function reference needs weak_import to link on Mach-O, so the
+// un-instrumented control build failed to link on the host instead of compiling
+// as this file's contract says it does.
+#if defined(__SANITIZE_ADDRESS__)
+#define HAVE_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define HAVE_ASAN 1
+#endif
+#endif
+
+#ifdef HAVE_ASAN
+extern int __asan_address_is_poisoned(void const volatile *addr);
+#endif
 
 static int boom(void) {
 	char *p = malloc(4);
@@ -34,10 +48,10 @@ static int boom(void) {
 	// byte after the requested 4 is redzone. If it prints 0, libc served the
 	// request and no redzone was ever laid down — which alone explains why the
 	// store check below has a clean shadow byte to read.
-	if (__asan_address_is_poisoned != NULL) {
-		printf("address_is_poisoned(p+4) = %d\n",
-		    __asan_address_is_poisoned(p + 4));
-	}
+#ifdef HAVE_ASAN
+	printf("address_is_poisoned(p+4) = %d\n",
+	    __asan_address_is_poisoned(p + 4));
+#endif
 	// volatile is load-bearing. Go's default CGO_CFLAGS is "-O2 -g", and at -O2
 	// clang folds "p[4] = 1; v = p[4]" into the constant 1 and deletes the
 	// store — malloc and free survive, the out-of-bounds write does not, and

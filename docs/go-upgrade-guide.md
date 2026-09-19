@@ -135,6 +135,10 @@ cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
 
 `$GOROOT/bin` 必须在 `PATH` 上，否则 `go` 的 `pathcache.LookPath("go_openharmony_arm64_exec")`（`cmd/go/internal/work/build.go:902`）找不到它。设备由 `OHOS_HDC` / `OHOS_TARGET` 选（默认 `hdc` 与模拟器 `127.0.0.1:5555`）。
 
+**这一段为何要手装：** `cmd/dist/build.go` 的 `wrapperPathFor` 里 `openharmony` 那条分支与上游 android/ios 逐字同形，只在 `oldgoos != gohostos` 时命中 —— 即只有交叉自举（`GOOS=openharmony GOARCH=arm64 ./make.bash`）才自动装，普通自举下返回空。该分支**未在完整交叉自举中执行过**，但其载荷已按 dist 的原命令单验（`GOOS=darwin GOARCH=arm64 go build -o <tmp> misc/go_openharmony_exec/main.go`，rc=0，产物在宿主上行为正确），残差风险只有那 3 行 `goos` 管道，与 android 一致。
+
+**回归测试已入 dist：** `src/cmd/dist/test.go` 注册了 `misc:execwrapper`（`./all.bash` 会跑），跑的就是本包装的退出码解析。它存在的原因是一次真实故障：`exitFilter.code` 的零值 0 与 `code < 0` 的判断让"设备没回传状态"分支成为死代码，于是设备根本没执行任何东西也会返回成功。改 `main.go` 的退出码路径时这条测试会挡下来。
+
 ---
 
 ## 5. 自举构建（Bootstrap）
@@ -209,6 +213,42 @@ OHOS 在 `go_test.go` 定义了 `goos`（= "openharmony" when IsOpenharmony）�
 
 `versions\ohos-go`（合并后的 main）只有源码，没有 `pkg/` 编译产物，`bin/` 下没有 go.exe。
 直接用它会报错。必须先 `make.bat` 构建。
+
+### 6.7 刷新 macOS 的已装工具链（`~/go1.27.1-ohos`）
+
+`~/go1.27.1-ohos` 是下游（v2rayHM 的 `scripts/build_*.sh` 默认 `OHOS_GO_ROOT`）实际使用的
+工具链。它不是 git 仓库，只是本仓库工作区的拷贝 + 一次 `make.bash`。源码改动后要这样刷：
+
+```bash
+cd ~/projects/ohos-go
+rsync -a --delete \
+  --exclude '.git/' --exclude 'bin/' --exclude 'pkg/' --exclude 'go.env' \
+  --exclude 'src/cmd/dist/dist' --exclude '.DS_Store' \
+  --exclude '.claude/' --exclude 'CLAUDE.md' --exclude 'resume.sh' \
+  ./ ~/go1.27.1-ohos/
+cd ~/go1.27.1-ohos/src && GOTOOLCHAIN=local GOPROXY=off \
+  GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec ./make.bash
+cd ../misc && ../bin/go build -o ../bin/go_openharmony_arm64_exec ./go_openharmony_exec
+cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
+```
+
+三处必须排除，各有原因：
+
+- **`go.env`**：发布树里是 `GOTOOLCHAIN=local`（外加一段说明），源码树是上游的 `auto`。
+  反向覆盖会让这棵树有被自动换掉的风险 —— 而上游工具链编不出 `GOOS=openharmony`。
+  没有任何 dist 代码会写这个文件，那个 `local` 是手工改的，同步时别冲掉。
+- **`bin/`、`pkg/`**：构建产物，交给 `make.bash` 自己维护。
+- **`.claude/`、`CLAUDE.md`、`resume.sh`**：本仓库的开发脚手架，不属于 Go 发行版。
+
+`-exec` 包装仍需手装：普通 `make.bash` 的 `goos == gohostos`，`wrapperPathFor` 返回空（见 §4.2）。
+
+刷新后的三连验收：
+
+```bash
+~/go1.27.1-ohos/bin/go version                       # go version go1.27.1 darwin/arm64
+cd ~/go1.27.1-ohos/src && ../bin/go tool dist test -run=misc:execwrapper
+PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go test strings
+```
 
 ---
 

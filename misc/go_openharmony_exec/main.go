@@ -121,7 +121,7 @@ func run(hdcPath, target, cmdline string) (int, error) {
 	// stderr is wrapped in a bare struct so that a wedged hdc cannot hold the
 	// fd open and stall `go test`, which reads the child until EOF.
 	cmd := exec.Command(hdcPath, append(hdcArgs(target), "shell", cmdline+"; echo "+exitStr+"$?")...)
-	f := &exitFilter{}
+	f := newExitFilter(os.Stdout)
 	cmd.Stdout = f
 	cmd.Stderr = struct{ io.Writer }{os.Stderr}
 	err := cmd.Run()
@@ -145,8 +145,19 @@ func run(hdcPath, target, cmdline string) (int, error) {
 // time because hdc line-buffers; the trailing partial line is held until
 // Finish so that a split sentinel is still recognised.
 type exitFilter struct {
+	w    io.Writer
 	buf  []byte
 	code int
+}
+
+// newExitFilter returns a filter that reports no status yet. The -1 initial
+// value is what keeps a run that never reports one from being read as a success:
+// hdc exits non-zero when it cannot reach the device, but that arrives as an
+// *exec.ExitError, which run deliberately does not propagate, so the sentinel is
+// the only remaining signal. Constructing through here rather than a bare struct
+// literal keeps that decision in one place for run and for the tests.
+func newExitFilter(w io.Writer) *exitFilter {
+	return &exitFilter{w: w, code: -1}
 }
 
 func (f *exitFilter) Write(p []byte) (int, error) {
@@ -181,7 +192,7 @@ func (f *exitFilter) line(l []byte) {
 			}
 		}
 	}
-	os.Stdout.Write(append(bytes.TrimRight(l, "\r"), '\n'))
+	f.w.Write(append(bytes.TrimRight(l, "\r"), '\n'))
 }
 
 func hdc(hdcPath, target string, args ...string) error {

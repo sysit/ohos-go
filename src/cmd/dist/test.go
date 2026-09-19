@@ -1006,6 +1006,15 @@ func (t *tester) registerTests() {
 			})
 	}
 
+	// The OpenHarmony exec wrapper's exit-code parsing is pure host-side logic,
+	// so it gets a real test even though nothing else runs misc's tests.
+	// Deliberately not ./... — misc/ios and misc/cgo/gmp do not build on the host.
+	if gohostos != "windows" {
+		t.addTest("misc:execwrapper", "Testing the OpenHarmony exec wrapper.", func(*distTest) error {
+			return t.dirCmd("misc", gorootBinGo, []string{"test", "./go_openharmony_exec"}).Run()
+		})
+	}
+
 	// Only run the API check on fast development platforms.
 	// Every platform checks the API on every GOOS/GOARCH/CGO_ENABLED combination anyway,
 	// so we really only need to run this check once anywhere to get adequate coverage.

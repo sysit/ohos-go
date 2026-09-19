@@ -54,5 +54,11 @@ if [ -z "$code" ]; then
 	exit 125
 fi
 
-printf '%s\n' "$out" | sed '$d'
+# Drop the sentinel from the last line, then print everything before it. The
+# sentinel is anchored at end-of-line, so a binary that ends without a trailing
+# newline keeps its last line instead of losing it to a blanket `sed '$d'`.
+# (awk rather than sed: deleting "the last line only if it is now empty" is not
+# portable in one sed expression, and an unconditional blank line would show up
+# on every run.)
+printf '%s\n' "$out" | awk '{sub(/__EXIT__[0-9]*$/, "")} NR>1{print prev} {prev=$0} END{if (prev != "") print prev}'
 exit "$code"
