@@ -82,6 +82,8 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 
 ## 4. OHOS 核心特性清单（升级时必须保留）
 
+### 4.1 升级时必须保留的特性
+
 升级后务必逐项核对以下能力仍在：
 
 | 特性 | 关键位置 |
@@ -97,6 +99,41 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | 共享库 GC 数据 | `cmd/link/internal/ld/decodesym.go` 的 `decodetypeGcprogShlibByReloc` |
 | 测试标签 | `testing/benchmark.go` 的 goos 打印、`crash_cgo_test.go` 的 openharmony case |
 | 链接器跳过 | `cmd/link/link_test.go`（race detector skip `|| runtime.IsOpenharmony`） |
+
+### 4.2 能力实测结论（2026-09，go1.27.1）
+
+设备：模拟器 `127.0.0.1:5555`（`HongMeng Kernel`/Linux 5.10.210，SDK clang 15.0.4）。
+夹具与执行包装在 `misc/openharmony/`：`ohosrun` 负责推送执行，其余每个目录一个能力。
+判定原则：**链接成功 ≠ 能力可用**，下表每行都附设备上的实测证据。
+
+| 能力 | 结论 | 证据 / 备注 |
+|---|---|---|
+| `c-archive` | ✅ 可用 | `cdriver link` 静态链 `.a` → `Add(40,2)=42` |
+| `c-shared` | ✅ 可用 | `dlopen(RTLD_NOW)`+`dlsym` 与链接期 `-ladd` 两条路都 → 42 |
+| `plugin` | ✅ 可用 | `plug.so` + PIE 宿主 `plugin.Open`→`Lookup` → 42 |
+| `shared` | ✅ 可用 | `libstd.so`（74 MB）+ `LD_LIBRARY_PATH` → `-linkshared` 宿主打印 42 |
+| **cgo 可执行文件** | ⚠️ **必须 `-buildmode=pie`** | 默认 buildmode 下任何 `import "C"` 的程序在 `init()` 之前 `Signal 11`（exit 139）；`-buildmode=pie` 即正常。两者都是 ELF `DYN`+`PIE`，差别在 codegen/链接标志，不在容器格式。最小复现：`misc/openharmony/cgomin` |
+| `-asan` | ✅ 可用（须配 `-buildmode=pie`） | 设备上打印 `ERROR: AddressSanitizer: heap-buffer-overflow` + `0 bytes to the right of 4-byte region` |
+| `-race` | ❌ 不可用（不开门） | TSAN 的 arm64 `InitializePlatformEarly` 硬要求 48 位 VMA（`cmp #48` / `b.ne` → `unsupported VMA range`），而设备用户地址空间只有 39 位：ASan 自报 `HighMem [0x002000000000, 0x007fffffffff]`，探针 `vma_bits_stack=38`。TSAN shadow 在 32 TiB（45 位）处，够不着。开了只会把构建期一句清楚报错换成运行期 sanitizer 崩溃 |
+| `-msan` | ❌ 不可行 | SDK 里 `libclang_rt.msan*` 为零，且 MSan 要求插桩过的 libc，OHOS musl 不是 → 每个 libc 调用都会假阳性。`MSanSupported` 的 `default: return false` 保持不动 |
+| SVE | ✅ 汇编器可用（需 `GOEXPERIMENT=simd`） | `ZADD Z7.D, Z23.D, Z13.D` 为 `openharmony/arm64` 编出 `04e702ed`，与上游 `arm64sveenc.s` 期望的 `ed02e704` 逐字节相符。硬件执行未验：shell uid 读不了 `/proc/cpuinfo` |
+| x509 系统根 | ❌ 外部进程取不到 | 探针报 `certpool: error: open /etc/ssl/certs: permission denied`——目录存在但 shell uid 无权限（`/etc/security`、`/system/etc/security` 同样 denied）。**正解是 `SSL_CERT_FILE`/`SSL_CERT_DIR`**（`root.go` 已尊重），故不加 `root_openharmony.go`，零 delta |
+| 真机执行 | ⚠️ 受限 | 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（`Permission denied`）。本轮所有设备侧结论出自模拟器 |
+| `-exec` 自动执行 | ✅ 可用 | `misc/go_openharmony_exec` 经 `go_<GOOS>_<GOARCH>_exec` 约定被 `go test` 自动发现：`GOOS=openharmony GOARCH=arm64 go test strings` → `ok strings 3.661s`。设备侧回程证据：`GOOS=linux GOARCH=arm64 IsOpenharmony=true`（**split identity 在运行中的设备进程里被观察到**），且故意失败的用例正确回传 `FAIL` + 非零退出码 |
+
+两个必须记住的操作细节：
+
+- **c-archive 在 macOS 上会静默产出 96 字节空库**：`/usr/bin/ar`（cctools）拒收 ELF 成员（`Inappropriate file type or format`），一个都不加却返回 0。必须 `AR=$SDK/native/llvm/bin/llvm-ar`。只有 c-archive 走 `ar`（`cmd/link/internal/ld/lib.go` 的 `archive()`）。
+- **`-asan` 夹具的越界写必须 `volatile`**：Go 默认 `CGO_CFLAGS` 是 `-O2 -g`，`p[4] = 1; v = p[4]` 会被折叠成常量 1、写整个被删除（`malloc`/`free` 还在），于是根本没有越界可供检出。用 `volatile char *q = p + 4; *q = 1;`。
+
+**装 `-exec` 包装**（普通 `make.bash` 不装它 —— `cmdbootstrap` 里 `goos` 此时等于宿主的 `gohostos`，`wrapperPathFor` 返回空；只有 `GOOS=openharmony ./make.bash` 走交叉自举分支才会自动装）：
+
+```bash
+cd misc && $GOROOT/bin/go build -o $GOROOT/bin/go_openharmony_arm64_exec ./go_openharmony_exec
+cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
+```
+
+`$GOROOT/bin` 必须在 `PATH` 上，否则 `go` 的 `pathcache.LookPath("go_openharmony_arm64_exec")`（`cmd/go/internal/work/build.go:902`）找不到它。设备由 `OHOS_HDC` / `OHOS_TARGET` 选（默认 `hdc` 与模拟器 `127.0.0.1:5555`）。
 
 ---
 
@@ -214,7 +251,27 @@ git diff <上游tag> -- src/internal/platform/zosarch.go  # openharmony 条目�
 
 # 3) 真机/模拟器运行（flutter）
 fvm flutter run -d 127.0.0.1:5555   # 需 GOROOT 指向 OHOS 工具链
+
+# 4) 能力验收夹具（misc/openharmony/，结论见 §4.2）
+SDK=<sdk>; LLVM=$SDK/native/llvm/bin
+export OHOS_HDC=$SDK/toolchains/hdc OHOS_TARGET=127.0.0.1:5555
+export CC="$LLVM/clang --target=aarch64-linux-ohos --sysroot=$SDK/native/sysroot -D__MUSL__"
+export AR="$LLVM/llvm-ar"                 # 必须：macOS 的 /usr/bin/ar 拒收 ELF 成员
+export GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 GOTOOLCHAIN=local
+
+cd misc                                   # 夹具在 misc 模块里，必须在 misc 下构建
+../bin/go build -o /tmp/probe ./openharmony/probe && ./openharmony/ohosrun /tmp/probe
+../bin/go build -buildmode=c-shared  -o /tmp/libadd.so ./openharmony/cshared
+../bin/go build -buildmode=c-archive -o /tmp/libadd.a  ./openharmony/cshared
+../bin/go build -buildmode=plugin    -o /tmp/plug.so   ./openharmony/plug
+../bin/go build -asan -buildmode=pie -o /tmp/asandemo  ./openharmony/asandemo
 ```
+
+`probe` 是零依赖的事实采集器（split identity、VMA 宽度、CA 库位置、DNS），**升级后先跑它** ——
+`vma_bits_*` 直接决定 `-race` 能不能开门。其余目录各自对应 §4.2 表格里的一行能力：
+`cshared`+`cdriver`（c-archive/c-shared，驱动怎么链见 `cdriver/main.c` 的文件头）、
+`plug`+`hostplug`、`libadd`+`hostshared`、`asandemo`、`cgomin`（PIE 最小复现）。
+`CGO_ENABLED=0` 的 `probe` 不需要 `CC`。
 
 ---
 

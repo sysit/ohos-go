@@ -1,0 +1,58 @@
+#!/bin/sh
+# ohosrun pushes a cross-compiled binary to an OpenHarmony target and runs it.
+#
+#	ohosrun ./probe [args...]
+#
+# The exit status is the remote binary's exit status. hdc's own status is
+# unreliable, so the remote shell echoes a sentinel and we parse it.
+#
+# Environment:
+#	OHOS_HDC	path to hdc (default: hdc, i.e. expected on PATH)
+#	OHOS_TARGET	hdc -t target (default: 127.0.0.1:5555, the emulator)
+#			The real device 4VM0125513000074 is a commercial
+#			("undebuggable") build whose sh domain cannot exec
+#			binaries under /data/local/tmp, so the emulator is the
+#			default. See docs/go-upgrade-guide.md §4.2.
+#
+# Run from the repository root of the ohos-go fork.
+
+set -eu
+
+HDC=${OHOS_HDC:-hdc}
+TARGET=${OHOS_TARGET:-127.0.0.1:5555}
+DIR=/data/local/tmp/ohosrun
+
+if [ $# -lt 1 ]; then
+	echo "usage: ohosrun <host-binary> [args...]" >&2
+	exit 2
+fi
+
+bin=$1
+shift
+[ -f "$bin" ] || { echo "ohosrun: no such file: $bin" >&2; exit 2; }
+name=$(basename "$bin")
+
+remote=$DIR/$name
+"$HDC" -t "$TARGET" shell "mkdir -p $DIR" >/dev/null
+"$HDC" -t "$TARGET" file send "$bin" "$remote" >/dev/null
+"$HDC" -t "$TARGET" shell "chmod +x $remote" >/dev/null
+
+# Quote each argument for the remote shell.
+args=
+for a in "$@"; do
+	args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"
+done
+
+out=$("$HDC" -t "$TARGET" shell "$remote$args; echo __EXIT__\$?" 2>&1) || true
+
+code=$(printf %s "$out" | sed -n 's/.*__EXIT__\([0-9][0-9]*\)$/\1/p' | tail -1)
+if [ -z "$code" ]; then
+	printf '%s\n' "$out"
+	echo "ohosrun: no exit code from remote (target $TARGET)" >&2
+	echo "ohosrun: on the real device this means the sh domain refused to exec;" >&2
+	echo "ohosrun: set OHOS_TARGET=127.0.0.1:5555 to use the emulator." >&2
+	exit 125
+fi
+
+printf '%s\n' "$out" | sed '$d'
+exit "$code"
