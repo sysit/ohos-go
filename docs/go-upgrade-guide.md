@@ -121,7 +121,25 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | SVE | ✅ 汇编器可用（需 `GOEXPERIMENT=simd`） | `ZADD Z7.D, Z23.D, Z13.D` 为 `openharmony/arm64` 编出 `04e702ed`，与上游 `arm64sveenc.s` 期望的 `ed02e704` 逐字节相符。硬件执行未验：shell uid 读不了 `/proc/cpuinfo` |
 | x509 系统根 | ❌ 外部进程取不到 | 探针报 `certpool: error: open /etc/ssl/certs: permission denied`——目录存在但 shell uid 无权限（`/etc/security`、`/system/etc/security` 同样 denied）。**正解是 `SSL_CERT_FILE`/`SSL_CERT_DIR`**（`root.go` 已尊重），故不加 `root_openharmony.go`，零 delta |
 | 真机执行 | ⚠️ 受限 | 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（`Permission denied`）。本轮所有设备侧结论出自模拟器 |
+| **应用域环回 bind/listen/accept** | ✅ 可用 | **由 `sh` 域测不出来**。夹具 `misc/openharmony/loopbackhap`（无窗口 UIAbility，`@ohos.net.socket`）以 uid `20020077`（`u:r:app:s0`）跑：A `bind 127.0.0.1:0`、B `bind ::1:0`、C `bind 0.0.0.0:0`、D `listen 127.0.0.1:39321`、E 对自己 `connect` 并**收到入站连接**，五个全 OK。旁证：`com.9bt.transmissionbtm`（uid `20020076`）在同一个模拟器上 bind 了 `0.0.0.0:51413`。故 B 层 17 包环回类 FAIL 是 **`sh` 权限域限制，非 port 缺陷**（详见 `docs/ohos-full-test-plan.md` §5.1 / §5.3 的环回类） |
 | `-exec` 自动执行 | ✅ 可用 | `misc/go_openharmony_exec` 经 `go_<GOOS>_<GOARCH>_exec` 约定被 `go test` 自动发现：`GOOS=openharmony GOARCH=arm64 go test strings` → `ok strings 3.661s`。设备侧回程证据：`GOOS=linux GOARCH=arm64 IsOpenharmony=true`（**split identity 在运行中的设备进程里被观察到**），且故意失败的用例正确回传 `FAIL` + 非零退出码 |
+
+**「设备上 bind 不了 127.0.0.1」这件事，要用应用域的夹具来判，不能靠 `sh` 下的测试**
+
+B 层那 17 个包的环回类 FAIL 一度看起来像 port 缺陷（症状是 nettest 掩盖过的
+`tcp is not supported on linux/arm64`，看不出真 errno）。判据换域才成立：同一个模拟器，
+`sh` 域（`uid=2000`/`u:r:sh:s0`）起不了监听，应用域（`uid=20020077`/`u:r:app:s0`）五个探针全过。
+**所以这类 FAIL 的成因是「跑测试的域」，不是移植代码。** 复现步骤、五个探针的含义、
+以及判读规则（A/D 失败才算真缺陷）都在 `misc/openharmony/loopbackhap/README.md`。
+
+两个操作要点：
+
+- **模拟器不验 HAP 签名**：`hdc install -r entry-default-unsigned.hap` 直接 `install bundle successfully`，
+  所以这条夹具**不需要 DevEco 签名、不需要驱动 GUI**。这是**模拟器的性质**；
+  真机只信华为 CA，换真机必须重签（`~/.ohos/config/` 下那套 `*.p12/*.cer/*.p7b`）。
+- 新夹具的 `build-profile.json5` / `entry/build-profile.json5` / `oh-package.json5` / `hvigorfile.ts`
+  **从 DevEco 自带脚手架原样拷贝**（`plugins/codegenie-plugin/previewProject{Template}/`），
+  理由和那个 `@ohos/hamock@1.0.1-rc2` 的坑见 README。
 
 **为什么默认 PIE 还牵扯到解释器（两处必须同时存在）**
 
@@ -144,6 +162,21 @@ cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
 **这一段为何要手装：** `cmd/dist/build.go` 的 `wrapperPathFor` 里 `openharmony` 那条分支与上游 android/ios 逐字同形，只在 `oldgoos != gohostos` 时命中 —— 即只有交叉自举（`GOOS=openharmony GOARCH=arm64 ./make.bash`）才自动装，普通自举下返回空。该分支**未在完整交叉自举中执行过**，但其载荷已按 dist 的原命令单验（`GOOS=darwin GOARCH=arm64 go build -o <tmp> misc/go_openharmony_exec/main.go`，rc=0，产物在宿主上行为正确），残差风险只有那 3 行 `goos` 管道，与 android 一致。
 
 **回归测试已入 dist：** `src/cmd/dist/test.go` 注册了 `misc:execwrapper`（`./all.bash` 会跑），跑的就是本包装的退出码解析。它存在的原因是一次真实故障：`exitFilter.code` 的零值 0 与 `code < 0` 的判断让"设备没回传状态"分支成为死代码，于是设备根本没执行任何东西也会返回成功。改 `main.go` 的退出码路径时这条测试会挡下来。
+
+**stdout 保真度（2026-09-22，C 层实测暴露后修掉的一处真缺陷）**
+
+`exitFilter.line` 原来对**每一行**都写 `append(TrimRight(l,"\r"), '\n')`。对**行尾无换行**的程序
+输出，那一行是被 `; echo $?` 的哨兵粘上来的（`boom__EXIT__3`），程序本身**没有**输出那个 `\n` ——
+于是包装凭空多写一个字节。`cmd/internal/testdir` 的 `checkExpectedOutput`
+（`testdir_test.go:1205`）是**逐字节**比较、只做 `\r\n`→`\n` 规整，所以 `test/typeparam/issue50109.go`
+就是这么挂的：`.out` 是 17 字节的 `MySuperStruct`（无换行），回程变成 18 字节。
+现在哨兵**粘行**的分支不再补换行（`exitFilter.line` 的 `glued`），`exitcode_test.go`
+的 `sentinel glued to output` 那条断言同步从 `"boom\n"` 改成 `"boom"`。
+
+**已知限制（不修，在 hdc 层之下）：hdc shell 传不了 NUL。** 实测：程序 `write("A\x00BC")`
+（4 字节）经包装只回 `A`（1 字节）—— NUL 处截断，其后的字节一起丢。`test/nul1.go`
+（`// errorcheckoutput`，就是要造 NUL 源码）因此必挂。要修得改成「设备侧 stdout 重定向到文件
+再 `hdc file recv`」，动的是 `run()` 的核心路径，beta 阶段记成已知限制而不是冒险改。
 
 ---
 
@@ -255,6 +288,53 @@ cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 cd ~/go1.27.1-ohos/src && ../bin/go tool dist test -run=misc:execwrapper
 PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go test strings
 ```
+
+### 6.8 打发布 tarball
+
+发布物是**整棵安装树**（§6.7 那一棵），不是源码包 —— 下游要的是能直接换 `OHOS_GO_ROOT` 的东西。
+
+**打之前必须先验「发布构建标志」真的在树里。** `cmd/dist` 有个 release 闸门
+（`build.go:1399-1405`）：`isRelease || GO_BUILDER_NAME != ""` 时注入
+`GOFLAGS=-trimpath -ldflags=-w -gcflags=cmd/...=-dwarf=false`。`isRelease`（`build.go:279`）
+判的是 goversion 以 `release.` 或 `go` 开头且不含 `devel` —— 所以 `VERSION` 是 `go1.27.1`
+时它就成立，**但只在真正重新编译各工具时生效**。
+
+> **踩过的坑：增量 `make.bash` 会把「没有 release 标志」的工具二进制原样留下。**
+> 症状是 `bin/go` 里嵌着绝对路径、`compile` 带 DWARF（36.2 MB vs 正常的 27.1 MB），
+> 而 `make.bash` 每次退出码都是 0。**这不是路径太长之类的无害差异** ——
+> `-trimpath` 是发布构建的硬要求。
+> 判据与修法：`strings bin/go | grep -c '<树的绝对路径>'` **必须是 0**；
+> 且 `pkg/tool/darwin_arm64/{compile,link,asm,cgo}` 的 sha256 应与本仓库的一致。
+> 不符就 **`rm -rf bin pkg` 后重跑 `make.bash`**（强制全量，别指望增量自己发现）。
+
+```bash
+cd ~ && tar czf /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz \
+  --exclude='go1.27.1-ohos/ohos-test-results' \
+  --exclude='go1.27.1-ohos/ohos-test-results-*' \
+  --exclude='.DS_Store' \
+  go1.27.1-ohos
+shasum -a 256 /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz \
+  | tee /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz.sha256
+```
+
+- **解包后必须落到 `go1.27.1-ohos/`**（`tar` 的成员名就是它）。下游默认
+  `OHOS_GO_ROOT=$HOME/go1.27.1-ohos`，改名字等于多一步配置。
+- **`ohos-test-results*` 是唯一必须排的东西**（本仓库跑全量测试的落盘目录，约 29 MB）。
+  `.DS_Store` 是习惯性排除。**`pkg/openharmony_arm64_dynlink` 不用排** ——
+  那只是 `-buildmode=shared` 能力测试的宿主产物，本树里根本没有（`pkg/` 只有 `include` 与 `tool`）。
+- 命名刻意**不与官方 `go1.27.1.*` 同名**，免得装串。
+
+打完的验收（**这一步不能省，它验的是「交出去的那个文件」而不是「你本地那棵树」**）：
+
+```bash
+tar tzf <tarball> | grep -E 'ohos-test-results|\.DS_Store'    # 必须为空
+cd /tmp && tar xzf <tarball> && /tmp/go1.27.1-ohos/bin/go version
+# 再解出一棵新树、用它编一个 cgo 可执行文件，确认 PIE + musl 解释器：
+readelf -l app | grep INTERP          # → /lib/ld-musl-aarch64.so.1
+```
+
+最后那条是关键：**新解出来的树必须自己就能产出可用产物** ——
+只跑 `go version` 会漏掉「`pkg/tool` 没打进去」这类缺陷。
 
 ---
 
