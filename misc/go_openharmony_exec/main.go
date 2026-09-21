@@ -12,8 +12,9 @@
 //
 //	GOOS=openharmony GOARCH=arm64 go test ./pkg
 //
-// pushes the test binary to the device, runs it there, and reports its exit
-// status as if it had run locally.
+// pushes the test binary to the device, mirrors the package's working
+// directory alongside it, runs the binary there from that mirror, and reports
+// its exit status as if it had run locally.
 //
 // Environment:
 //
@@ -32,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -76,17 +78,27 @@ func runMain() int {
 
 	// Unique per process: two builds of the same package (different modules)
 	// would otherwise race on one remote path.
-	remote := fmt.Sprintf("%s/%s-%d", deviceRoot, path.Base(bin), os.Getpid())
-	if err := hdc(hdcPath, target, "shell", "mkdir -p "+deviceRoot); err != nil {
+	work := fmt.Sprintf("%s/%s-%d", deviceRoot, path.Base(bin), os.Getpid())
+	// mkdir -p creates deviceRoot too, and work must exist before the binary is
+	// pushed into it: hdc does not create missing parents.
+	if err := hdc(hdcPath, target, "shell", "mkdir -p "+work); err != nil {
 		return fail("mkdir", err)
 	}
-	defer hdc(hdcPath, target, "shell", "rm -rf "+remote)
+	defer hdc(hdcPath, target, "shell", "rm -rf "+work)
 
+	remote := path.Join(work, path.Base(bin))
 	if err := hdc(hdcPath, target, "file", "send", bin, remote); err != nil {
 		return fail("push", err)
 	}
 	if err := hdc(hdcPath, target, "shell", "chmod +x "+remote); err != nil {
 		return fail("chmod", err)
+	}
+
+	// Run from a mirror of the package directory, so tests that read files
+	// sitting next to their sources have something to read.
+	deviceCwd, err := pushSourceTree(hdcPath, target, work)
+	if err != nil {
+		return fail("push sources", err)
 	}
 
 	quoted := make([]string, 0, len(os.Args))
@@ -95,6 +107,9 @@ func runMain() int {
 		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
 	cmdline := strings.Join(quoted, " ")
+	if deviceCwd != "" {
+		cmdline = "cd " + deviceCwd + " && " + cmdline
+	}
 
 	code, err := run(hdcPath, target, cmdline)
 	if err != nil {
@@ -138,6 +153,45 @@ func run(hdcPath, target, cmdline string) (int, error) {
 		}
 	}
 	return f.code, nil
+}
+
+// pushSourceTree mirrors the wrapper's working directory onto the device and
+// returns the path to run the test binary from, or "" if there is nothing to
+// mirror.
+//
+// `go test` runs this wrapper with its working directory set to the package
+// directory, which is the only handle we have on where the test expects to be.
+// Without the mirror, tests that read files next to their sources fail for
+// reasons that have nothing to do with the port: os looks for stat_linux.go in
+// the working directory, io/fs's TestGlob walks it, and text/template opens
+// testdata/. go_android_exec solves the same problem with adbCopyTree.
+//
+// The host directory is mirrored under work/cwd, so the device layout is a copy
+// of the host one and no import-path bookkeeping is needed. hdc copies
+// directories recursively, so a single call brings the sources and the
+// package's own testdata across.
+//
+// ponytail: only the package directory itself is copied, not the testdata of
+// parent packages. go_android_exec walks the tree upwards for that; add the
+// same walk here if a test turns out to read ../testdata.
+func pushSourceTree(hdcPath, target, work string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if cwd == string(filepath.Separator) {
+		// Nothing useful lives at the root; mirroring it would produce a
+		// one-component path and copy the whole filesystem.
+		return "", nil
+	}
+	deviceCwd := path.Join(work, "cwd", filepath.ToSlash(cwd))
+	if err := hdc(hdcPath, target, "shell", "mkdir -p "+path.Dir(deviceCwd)); err != nil {
+		return "", err
+	}
+	if err := hdc(hdcPath, target, "file", "send", cwd, path.Dir(deviceCwd)); err != nil {
+		return "", err
+	}
+	return deviceCwd, nil
 }
 
 // exitFilter forwards the remote output to stdout, withholding the sentinel
@@ -195,11 +249,27 @@ func (f *exitFilter) line(l []byte) {
 	f.w.Write(append(bytes.TrimRight(l, "\r"), '\n'))
 }
 
+// hdc runs a setup command on the device, discarding its chatter unless it
+// failed.
+//
+// hdc reports failures on stdout as a "[Fail]" line and *still exits zero*: a
+// `file send` into a directory that does not exist prints
+// "[Fail]Error opening file: no such file or directory" and exits 0. The exit
+// status alone therefore proves nothing, and without this check a failed push
+// degrades silently into "the test ran but its data was missing" -- exactly the
+// harness defect that is indistinguishable from a port bug.
 func hdc(hdcPath, target string, args ...string) error {
 	cmd := exec.Command(hdcPath, append(hdcArgs(target), args...)...)
-	cmd.Stdout = io.Discard
+	var out bytes.Buffer
+	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if bytes.Contains(out.Bytes(), []byte("[Fail]")) {
+		return fmt.Errorf("hdc %s: %s", strings.Join(args, " "), strings.TrimSpace(out.String()))
+	}
+	return nil
 }
 
 func hdcArgs(target string) []string {
