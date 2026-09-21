@@ -438,6 +438,10 @@ func elffips(ctxt *Link, exe, fipso string) error {
 		}
 	}
 
+	// Fill in any pointer slots the host linker left as zero.
+	// See elffipsRelocs.
+	elffipsRelocs(ctxt, ef, sect, data, uptr)
+
 	// Add the sections listed in go:fipsinfo to the FIPS object.
 	// We expect R_zzz_RELATIVE relocations where the zero-based
 	// values are already stored in the data. That is, the addend
@@ -596,4 +600,57 @@ Addrs:
 		return err
 	}
 	return f.Close()
+}
+
+// elffipsRelocs rewrites the go:fipsinfo pointer slots that the host linker
+// left as zero, in place in data.
+//
+// The loop in elffips assumes the ELF already holds the R_*_RELATIVE addends
+// in the section data ("the addend is in the data itself in addition to being
+// in the relocation tables"). lld does not do that: it writes zero into the
+// section and keeps the addend in .rela.dyn only. Every slot then reads back
+// as 0, the PT_LOAD search matches the vaddr-0 segment (the 0 <= 0 bound
+// holds), and the sum written out is the hash of four empty ranges. That sum
+// is nonzero, so the run-time check reports "verification mismatch" rather
+// than "no verification checksum found" -- and hostlinkfips's error is
+// discarded by its caller, so the link itself says nothing.
+//
+// Recovering the addends is all that is needed: they are the link-time virtual
+// addresses, which is exactly what the run-time check expects to read back out
+// of the section. Slots the linker did fill in are left alone, so this is a
+// no-op for linkers that already behave the way elffips assumes.
+//
+// ponytail: reads .rela.dyn only, which is where RELATIVE entries live; 32-bit
+// ELF (implicit-addend .rel) is skipped, and no openharmony target is 32-bit.
+func elffipsRelocs(ctxt *Link, ef *elf.File, sect *elf.Section, data []byte, uptr func([]byte) uint64) {
+	if ctxt.Arch.PtrSize != 8 {
+		return
+	}
+	rela := ef.Section(".rela.dyn")
+	if rela == nil {
+		return
+	}
+	b, err := rela.Data()
+	if err != nil {
+		return
+	}
+
+	// Elf64_Rela entries are r_offset u64, r_info u64, r_addend i64, and
+	// r_offset is the virtual address of the patched word.
+	addends := make(map[uint64]uint64, len(b)/24)
+	for i := 0; i+24 <= len(b); i += 24 {
+		off := ef.FileHeader.ByteOrder.Uint64(b[i:])
+		if _, ok := addends[off]; !ok {
+			addends[off] = ef.FileHeader.ByteOrder.Uint64(b[i+16:])
+		}
+	}
+
+	for p := fipsMagicLen + fipsSumLen; p+8 <= len(data); p += 8 {
+		if uptr(data[p:]) != 0 {
+			continue
+		}
+		if add, ok := addends[sect.Addr+uint64(p)]; ok {
+			ctxt.Arch.ByteOrder.PutUint64(data[p:], add)
+		}
+	}
 }
