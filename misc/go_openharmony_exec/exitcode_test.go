@@ -34,11 +34,14 @@ func TestExitFilter(t *testing.T) {
 		},
 		{
 			// A binary that ends without a trailing newline glues its last
-			// output to the sentinel; that output must survive.
+			// output to the sentinel; that output must survive, and must stay
+			// unterminated. The newline here came from the echo that reads the
+			// status, and a test comparing output byte-for-byte (testdir's
+			// checkExpectedOutput) fails on the invented one.
 			name:   "sentinel glued to output",
 			writes: []string{"boom__EXIT__3"},
 			code:   3,
-			out:    "boom\n",
+			out:    "boom",
 		},
 		{
 			name:   "sentinel split across writes",

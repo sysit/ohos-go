@@ -549,16 +549,28 @@ func (f *exitFilter) Finish() {
 func (f *exitFilter) line(l []byte) {
 	// A test binary that ends without a trailing newline glues its last output
 	// to the sentinel, so look for the marker anywhere in the line.
+	glued := false
 	if i := bytes.Index(l, []byte(exitStr)); i >= 0 {
 		if n, err := strconv.Atoi(strings.TrimSpace(string(l[i+len(exitStr):]))); err == nil {
 			f.code = n
 			l = l[:i]
+			glued = true
 			if len(l) == 0 {
 				return
 			}
 		}
 	}
-	f.w.Write(append(bytes.TrimRight(l, "\r"), '\n'))
+	l = bytes.TrimRight(l, "\r")
+	// A glued line is the program's unterminated final output. The newline that
+	// ended it came from the `echo` that reads the status, not from the program,
+	// so re-adding one here would invent a byte the program never wrote:
+	// cmd/internal/testdir's checkExpectedOutput compares the bytes exactly and
+	// would report a mismatch the platform did not cause.
+	if glued {
+		f.w.Write(l)
+		return
+	}
+	f.w.Write(append(l, '\n'))
 }
 
 // hdc runs a setup command on the device, discarding its chatter unless it
