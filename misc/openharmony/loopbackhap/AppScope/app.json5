@@ -1,0 +1,12 @@
+{
+  "app": {
+    // 刻意用一个独立 bundleName：探针不该覆盖任何已装的应用。代价是需要一份
+    // 绑这个 bundleName 的签名 profile（DevEco 的「自动签名」会生成）。
+    "bundleName": "com.9bt.ohosloop",
+    "vendor": "ohos-go",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "LoopProbe: 应用域环回 bind/listen 探针"
+    },
+    {
+      "name": "LoopProbeAbility_desc",
+      "value": "探针 ability"
+    },
+    {
+      "name": "LoopProbeAbility_label",
+      "value": "LoopProbe"
+    },
+    {
+      "name": "internet_permission_reason",
+      "value": "绑定本地环回端口需要网络权限"
+    }
+  ]
+}

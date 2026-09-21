@@ -1,0 +1,12 @@
+# DevEco / hvigor / ohpm 的机器相关产物，都不入库
+local.properties
+oh_modules/
+oh-package-lock.json5
+.hvigor/
+build/
+.cxx/
+node_modules/
+.idea/
+.clangd
+.clang-format
+.DS_Store
