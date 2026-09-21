@@ -331,6 +331,130 @@ crypto/internal/fips140/check.init.0()  …/check/check.go:93
 
 ---
 
+### 5.7 C 层 `test/` 全量实测（2026-09-22）：132 FAIL，其中 125 条是同一个链接器致命错误
+
+B 层管「标准库能不能用」，C 层管「编译器/链接器对不对」——载体是
+`go test cmd/internal/testdir -target=openharmony/arm64`，2734 个用例。
+
+跑法（三条硬前提见 §3：用**仓库** `./bin/go`、`CC` 写 SDK clang 绝对路径、`$GOROOT/bin` 在 `PATH` 上）：
+
+```bash
+cd src
+export OHOS_SDK=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony
+export PATH="$PWD/../bin:$PATH" CGO_ENABLED=1
+export CC="$OHOS_SDK/native/llvm/bin/clang --target=aarch64-linux-ohos --sysroot=$OHOS_SDK/native/sysroot -D__MUSL__"
+for i in 0 1 2 3; do
+  hdc list targets                      # 模拟器卡死不自愈，每片跑前必查
+  ../bin/go test cmd/internal/testdir -target=openharmony/arm64 \
+      -shards=4 -shard=$i -timeout=180m
+done
+```
+
+三个操作要点，都会咬人：
+
+- **分片是唯一可靠的续跑手段**（模拟器会 474% CPU 空转卡死且不自愈）。卡了就重启，原样重跑该片。
+- **`-shard` 是 0 基的。** `shardMatch`（`testdir_test.go:161`）是
+  `int(h.Sum32()%uint32(*shards)) == *shard`，所以 `-shards=4` 必须跑 `-shard=0 1 2 3`。
+  跑 `1 2 3 4` 会**静默漏掉 shard 0 的约 690 例**，而第 5 片只报一句
+  `nothing to test on shard index 4`（`testdir_test.go:1954`）。**这个坑真踩过一轮。**
+- `-timeout=180m` 是**宿主侧**的（跑的是宿主测试二进制），兜的是 hdc 挂死。
+
+结果 —— 两次独立全量跑逐例一致：
+
+| | 数 |
+|---|---|
+| RUN | **2739** |
+| FAIL（子测试） | **132** |
+| 与之对应的 `testdir_test.go:151: exit status 1` | **132** |
+
+口径：FAIL 用 `grep -c '^    --- FAIL: Test/'`（**4 空格缩进 = 子测试**）。
+别用 `^--- FAIL`：父测试 `--- FAIL: Test` 每片各 1 条，混进去会多算 4。分片是划分而非复制，
+所以 132 条**互不重复**。
+
+**132 条的构成（125 + 7，算术闭合）**：
+
+| 类 | 条数 | 定性 |
+|---|---|---|
+| `link: cannot handle R_ARM64_TLS_IE (sym runtime.load_g) when linking internally` | **125** | **testdir 载体限制，非 port 缺陷**（§5.7.1） |
+| 其余 7 条各自不同 | **7** | 逐条见 §5.7.3 |
+
+#### 5.7.1 那 125 条：是「缺省 `-buildmode` 的链接」，不是 port 缺陷
+
+testdir 的 `rundir` / `errorcheckandrundir` / `buildrundir` 三个 action **不走 cmd/go**：
+它们自己 `go tool compile`，再用 `linkFile`（`testdir_test.go:242`）直接调 `go tool link`：
+
+```go
+cmd := []string{goTool, "tool", "link", "-s", "-w", "-buildid=test", "-o", outfile, "-importcfg=" + importcfg}
+// 注意：没有 -buildmode
+```
+
+传递链是闭合的：
+
+1. 无 `-buildmode` → `cmd/link/internal/ld/main.go:285` 对未设值取 `exe`；
+2. `IsPIE()` 就是 `BuildMode == BuildModePIE`（`cmd/link/internal/ld/target.go:51`）→ **假**；
+3. 于是 `cmd/link/internal/arm64/asm.go:970` 的 `if target.IsPIE() && target.IsElf()` 走 else，落到
+   `asm.go:1010` 的 `log.Fatalf("cannot handle R_ARM64_TLS_IE (sym %s) when linking internally", …)`。
+
+而 `R_ARM64_TLS_IE` 会被发出来，是因为 OHOS 的运行时是 **iscgo** 构建
+（`runtime/tls_arm64.s` 的 `load_g` 走 IE/TLS 宏），stdlib 的 `.a` 里带这条重定位。
+**非 PIE 的内部链接没有实现这条重定位，是这个移植的已知空档；但 cmd/go 从不请求它** ——
+`platform.DefaultPIE` 对 openharmony 返回 true（`internal/platform/supported.go:242`，
+`case "android", "ios", "openharmony": return true`），默认 `go build` 出来就是 PIE。
+所以暴露面只限「testdir 这条手搓链接路径」。
+
+判据三条：
+
+1. 同一份代码走 cmd/go（默认 PIE）链得成；显式 `-buildmode=exe -ldflags=-linkmode=internal` 也链得成。
+2. cmd/go 从不把 openharmony 的默认 buildmode 设成非 PIE（`DefaultPIE`）。
+3. 上游 `linkFile` 对**任何**平台都不传 `-buildmode`，所以这条空档的暴露面天然限于 testdir。
+
+**不修的理由**：修它要么给 OHOS 补一套非 PIE 的 TLS_IE 内部链接（工作量大，且没有真实用户路径），
+要么改 testdir 按目标平台传 PIE（动上游测试框架，还会把「非 PIE 内部链接不可用」这个事实盖掉）。
+记成已知空档，升级路径见 §5.7.3。
+
+#### 5.7.2 本轮顺带修掉的 2 个真缺陷
+
+**（1）三个 TLS objcheck 测试的检查从未运行过（port 自己写的测试）。**
+`test/tls_le.s` / `tls_ie.s` / `tls_gd.s` 是移植时新增的，用来验证 `R_ARM64_TLS_{LE,IE,GD}`
+真的被汇编器发出来了。它们的 asmcheck 模式之间用了**逗号**当分隔符，而 testdir 有一条 lint
+（`testdir_test.go:1756`）明确拒绝 `",` 与 `` `, ``（`comma separator - use space instead`）。
+于是这三个用例**每次都在解析阶段就报错**，
+**三种 TLS 重定位的发射从来没被真正验证过**。改用空格后三条全 PASS —— 也就是说，
+这是本次 C 层实测**新拿到的验证**，不是回归。
+
+**（2）`-exec` 包装会凭空补一个换行。** 详见 §4.2 的「stdout 保真度」与
+`misc/go_openharmony_exec/exitcode_test.go` 的 `sentinel glued to output` 用例。
+C 层把它暴露成 `test/typeparam/issue50109.go`：`.out` 是 17 字节的无换行输出，回程变成 18 字节。
+
+#### 5.7.3 剩下 7 条逐条
+
+| 用例 | 报错 | 定性 |
+|---|---|---|
+| `fixedbugs/bug369.go` | `open : no such file or directory` | 包装 env 缺口：`STDLIB_IMPORTCFG` 未透传 → `os.ReadFile("")` |
+| `linkobj.go` | `listing stdlib export files: open : no such file or directory` | 同一根因（§5.6 已记的 env 白名单） |
+| `fixedbugs/issue10607.go` | `BUG: linkmode=external exit status 1` | 需 cgo 外部链接，而设备侧 `go build` 没有 cgo（§5.6 新增类 1 的同源） |
+| `fixedbugs/issue46234.go` | `fork/exec ./a.exe: exec format error` | `buildrun` 在**宿主**上执行产物、未过包装 → 宿主跑不了 aarch64 |
+| `fixedbugs/issue21317.go` | `failed to match "7:9: declared and not used: n"` | errorcheck 期望不匹配，**尚需单独看**（本轮未定性） |
+| `nilptr.go` | `panic: dummy too far out` | 运行时信号测试（`run` action），设备上的崩溃行为与预期不符 |
+| `nul1.go` | `string not terminated` | `hdc shell` 回程在 NUL 处截断（§4.2 已知限制）；用例本身就是要造 NUL 源码 |
+
+**结论：C 层 132 条 FAIL 里没有一条指向新的 port 缺陷**（两条真缺陷见 §5.7.2，已修）。
+`issue21317.go` 与 `nilptr.go` 两条尚未定性到底，是下一轮要先看的两条。
+
+#### 5.7.4 覆盖率的教训（和 §5.6 同一条，但方向相反）
+
+**95% 的 C 层 FAIL 是同一句 FATAL，而它挡在链接期。** `rundir` 系列的用例
+（含全部 `codegen` / 泛型 `typeparam` 用例）**编译发生了、运行没有**。所以
+「125 条不是 port 缺陷」**不等于**「这 125 个用例在 arm64 上的行为被验过了」——
+它们验的是**编译器**（以及 asmcheck/objcheck 那部分「看生成的指令」的价值），
+**没验运行期**。
+
+这是个反向的覆盖率陷阱：§5.6 那次是「sweep 全绿 ≠ 没缺陷」，
+这次是「**sweep 全红 ≠ 都验过了**」——同一个数字（FAIL 数）既可能藏缺陷，
+也可能藏**未覆盖**。要把运行期补上，只能让 testdir 走 PIE 链接（或让 OHOS 支持非 PIE 内部链接）。
+
+---
+
 ## 6. 耗时估算（为什么必须分批）
 
 单设备串行。每个 std 包 = build + push + run：
@@ -394,7 +518,16 @@ C 层 ~1220 例设备执行，**2–5 小时**。
 
 ### 阶段 3 —— 全量（小时级，发版/升级后跑一次）
 
-`runtests.sh --all`（B 层 262 包）+ C 层全量。**2026-09-21 已跑过一轮**：224 PASS / 38 FAIL / 0 TIMEOUT / 0 WRAPPER，其中 37 条落已知类、**1 条是真 port 缺陷（FIPS，已修）**，逐条 triage 见 **§5.3 / §5.4**。
+`runtests.sh --all`（B 层 262 包）+ C 层全量（`-shards=4`，见 §5.7）。**2026-09-21/22 已各跑一轮**：
+
+| 轮 | 层 | 结果 | triage |
+|---|---|---|---|
+| 2026-09-21 | B 层（v1 基线） | 226 PASS / 36 FAIL | §5.3（36 条全落已知类；真缺陷 FIPS **不在这 36 条里**，见 §5.4） |
+| 2026-09-21 | B 层（v3，镜像 GOROOT 后） | **239 PASS / 23 FAIL** | §5.6 |
+| 2026-09-22 | C 层（`test/`） | **2739 RUN / 132 FAIL** | §5.7（125 条是 testdir 载体限制，7 条逐条有据） |
+
+两轮合计**没有一条未定性的 port 缺陷**。上一代（go1.26.5）此处的记录是「224 PASS / 38 FAIL / 1 条真缺陷（FIPS）」——
+注意那条 FIPS 缺陷是**靠 §5.4 那种定向验证**才现形的，全量轮当时是绿的。
 
 脚本已兑现的特性：
 
