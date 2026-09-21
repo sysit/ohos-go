@@ -232,29 +232,36 @@ func decodetypeGcprogShlibByReloc(ctxt *Link, s loader.Sym) (uint64, bool) {
 			s, ctxt.loader.SymName(s), ctxt.loader.SymPkg(s))
 	}
 
-	if shlib.addendMap == nil {
-		return 0, false
-	}
-
 	// The value of type descriptor symbol is the address of its data.
-	dataStartAddr, ok := ctxt.loader.GetShlibSymValue(s)
-	if !ok {
-		log.Printf("Warning: GetShlibSymValue failed for s=%d, name=%s, sympkg=%s\n",
-			s, ctxt.loader.SymName(s), ctxt.loader.SymPkg(s))
+	if dataStartAddr, ok := ctxt.loader.GetShlibSymValue(s); ok && shlib.addendMap != nil {
+		// Get the address of GcData field in type descriptor's data.
+		gcDataFieldAddr := dataStartAddr + uint64(2*int32(ctxt.Arch.PtrSize)+8+1*int32(ctxt.Arch.PtrSize))
+		if addend, ok := shlib.addendMap[gcDataFieldAddr]; ok && addend != 0 {
+			return uint64(addend), true
+		}
+	}
+
+	if shlib.addendMap == nil {
+		// Machine getRelocAddendMapShlib does not handle; nothing to compare
+		// the field against, so leave the decision to the caller.
 		return 0, false
 	}
 
-	// Get the address of GcData field in type descriptor's data.
-	gcDataFieldAddr := dataStartAddr + uint64(2*int32(ctxt.Arch.PtrSize)+8+1*int32(ctxt.Arch.PtrSize))
-
-	addend, ok := shlib.addendMap[gcDataFieldAddr]
-	if !ok || addend == 0 {
-		log.Printf("Warning: get addend failed for s=%d, name=%s, sympkg=%s, gcDataFieldAddr=0x%x\n",
-			s, ctxt.loader.SymName(s), ctxt.loader.SymPkg(s), gcDataFieldAddr)
-		return 0, false
+	// No addend for the field, so the caller falls back to
+	// decodetypeGcprogShlib, which reads the field straight out of the section
+	// data. That is only the right value if the shlib's linker stored the
+	// addend in place -- GNU ld does, lld (the linker this port selects for
+	// openharmony) does not: it leaves the slot zero and keeps the value in
+	// .rela.dyn alone. A zero gcprog for a type that has pointers means the GC
+	// never scans those slots, which corrupts the heap silently. Refuse it.
+	symData := ctxt.loader.Data(s)
+	if ptrdata := decodetypePtrdata(ctxt.Arch, symData); ptrdata != 0 &&
+		decodetypeGcprogShlib(ctxt, symData) == 0 {
+		Exitf("no relocation addend for the GCData field of s=%d, name=%s, sympkg=%s, ptrdata=%d; "+
+			"the shared library keeps RELATIVE addends out of band and the field is still zero",
+			s, ctxt.loader.SymName(s), ctxt.loader.SymPkg(s), ptrdata)
 	}
-
-	return uint64(addend), ok
+	return 0, false
 }
 
 func decodetypeGcmask(ctxt *Link, s loader.Sym) []byte {

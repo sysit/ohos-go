@@ -2925,18 +2925,31 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 
 // getRelocAddendMapShlib generate a map.
 // key is r_offset, value is r_addend.
-// Reference to debug.(*elf).applyRelocations().
+//
+// This exists because the shared library for openharmony is linked by lld,
+// which -- unlike GNU ld and unlike the Go linker's own elfreloc1, both of
+// which also store the value in place -- keeps the addend of a RELATIVE
+// relocation in .rela.dyn only and leaves the field itself zero. Anything
+// that needs the link-time value of such a field has to come here for it.
 func getRelocAddendMapShlib(f *elf.File, libpath string) map[uint64]int64 {
 	switch {
 	case f.Class == elf.ELFCLASS64 && f.Machine == elf.EM_AARCH64:
-		return getRelocAddendMapShlibARM64(f, libpath)
+		return getRelocAddendMapShlibELF64(f, libpath, uint32(elf.R_AARCH64_RELATIVE))
+	case f.Class == elf.ELFCLASS64 && f.Machine == elf.EM_X86_64:
+		// Same lld behaviour on the other supported openharmony machine.
+		// ponytail: verified on arm64 only -- no amd64 device to test on;
+		// the shape matches lld's, and amd64/asm.go emits the same r_info
+		// with a zero symbol index.
+		return getRelocAddendMapShlibELF64(f, libpath, uint32(elf.R_X86_64_RELATIVE))
 	default:
 		// not implement of others
 	}
 	return nil
 }
 
-func getRelocAddendMapShlibARM64(f *elf.File, libpath string) map[uint64]int64 {
+// getRelocAddendMapShlibELF64 collects the addends of every relative
+// relocation in f, for the relocation type named by relative.
+func getRelocAddendMapShlibELF64(f *elf.File, libpath string, relative uint32) map[uint64]int64 {
 	addendMap := make(map[uint64]int64)
 	for _, sect := range f.Sections {
 		if sect.Type != elf.SHT_RELA {
@@ -2964,21 +2977,19 @@ func getRelocAddendMapShlibARM64(f *elf.File, libpath string) map[uint64]int64 {
 					libpath, sect.Name)
 			}
 			symNo := rela.Info >> 32
-			t := elf.R_AARCH64(rela.Info & 0xffff)
 			if symNo != 0 {
 				// not implement for symNo != 0
 				continue
 			}
-			switch t {
-			case elf.R_AARCH64_RELATIVE:
-				if v, ok := addendMap[rela.Off]; ok {
-					log.Printf("Warning: offset already existed, offset=%d, addend=%d, new addend=%d\n",
-						rela.Off, v, rela.Addend)
-				}
-				addendMap[rela.Off] = rela.Addend
-			default:
+			if uint32(rela.Info&0xffff) != relative {
 				// not implement of other types
+				continue
 			}
+			if v, ok := addendMap[rela.Off]; ok {
+				log.Printf("Warning: offset already existed, offset=%d, addend=%d, new addend=%d\n",
+					rela.Off, v, rela.Addend)
+			}
+			addendMap[rela.Off] = rela.Addend
 		}
 	}
 	return addendMap
