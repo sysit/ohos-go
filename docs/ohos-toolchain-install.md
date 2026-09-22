@@ -1,4 +1,4 @@
-# OHOS Go 工具链安装（go1.27.1-ohos beta1）
+# OHOS Go 工具链安装（go1.27.1-ohos beta2）
 
 ## 这是什么
 
@@ -6,20 +6,20 @@
 **go1.27.1**（`VERSION` 文件是权威）。发布形态是**预编译树 + tag**，所以你不需要
 `./make.bash`（那要 3 阶段自举，还要一个 go1.24.6+ 的 bootstrap）。
 
-本 beta 只发布 **darwin/arm64 宿主**（唯一实测过的宿主）。**下一个 cut 会同时出
-`linux/amd64` 宿主**（宿主可行性已实测，见 `docs/ohos-release-roadmap.md` ④）。
-支持的目标只有 `openharmony/arm64` 与 `openharmony/amd64` —— 与宿主架构无关。
+本 beta 发布 **darwin/arm64** 与 **linux/amd64** 两个宿主 —— 两份都在各自宿主上全量
+重建并实测过，不是交叉产出的。其他宿主可自行 `make.bash`（见文末）。
+支持的目标只有 `openharmony/arm64` 与 `openharmony/amd64` —— **与宿主架构无关**。
 
-> **版本串**：分支上 `VERSION` 已从 `go1.27.1` 改成 **`go1.27.1-ohos`**，好让 `go version`
-> 的输出能区分 fork 与上游（动机与雷区见 `docs/ohos-release-roadmap.md` ③）。
-> **但已发布的 beta1 tarball 早于这处改动，里面 `go version` 仍报 `go1.27.1`，**
-> 与上游**逐字相同** —— 拿到 beta1 时别以为装错了。用 `go1.27.1-ohos` 判断是下一次 cut 起。
+> **版本串**：`VERSION` 与 `go version` 都报 **`go1.27.1-ohos`**，好区分 fork 与上游。
+> （已发布的 **beta1** tarball 早于这处改动，里面报的还是裸 `go1.27.1`，与上游逐字相同。）
 
 ## 拿到与解包
 
+挑你宿主的那份（`<宿主>` = `darwin-arm64` 或 `linux-amd64`）：
+
 ```bash
-shasum -a 256 -c go1.27.1-ohos-beta1-darwin-arm64.tar.gz.sha256
-cd ~ && tar xzf /path/to/go1.27.1-ohos-beta1-darwin-arm64.tar.gz
+shasum -a 256 -c go1.27.1-ohos-beta2-<宿主>.tar.gz.sha256   # Linux 用 sha256sum -c
+cd ~ && tar xzf /path/to/go1.27.1-ohos-beta2-<宿主>.tar.gz
 # → ~/go1.27.1-ohos
 ```
 
@@ -53,6 +53,10 @@ export CC="$OHOS_SDK/native/llvm/bin/clang --target=aarch64-linux-ohos \
 
 裸 `clang` 会解析到 Apple 的 `/usr/bin/clang`，它不认识 `aarch64-linux-ohos`，报
 `clang: error: unable to execute command: posix_spawn failed: No such file or directory`。
+Linux 宿主上没有这层同名冲突，但**仍然要写绝对路径** —— 系统装的 `clang` 一样不认这个 target。
+
+`OHOS_SDK` 就是你自己那个 SDK 的根；上面是 macOS 上 DevEco Studio 的默认位置，
+Linux 上通常是你解压的 commandline-tools 目录。
 
 **`--target` 跟着目标架构走**：arm64 是 `aarch64-linux-ohos`，amd64 是 `x86_64-linux-ohos`。
 
@@ -86,8 +90,8 @@ openharmony/amd64 requires external (cgo) linking, but cgo is not enabled
 ```
 
 —— 指了方向，但没告诉你「为什么 arm64 行、amd64 不行」。机制与实测见
-`docs/go-upgrade-guide.md` **§4.3**。（若你拿到的是 **beta1 的 tarball**，这条还不存在：
-那棵树里 amd64 的默认构建直接死在 `cannot handle R_AMD64_TLS_GD ... when linking internally`。）
+`docs/go-upgrade-guide.md` **§4.3**。（**beta1 的 tarball** 里这句报错还不存在：那棵树
+amd64 的默认构建直接死在 `cannot handle R_AMD64_TLS_GD ... when linking internally`。）
 
 ## 交叉编译
 
@@ -106,6 +110,7 @@ go build -buildmode=c-shared -o lib.so .   # 给 HarmonyOS 应用加载
   `-buildmode=pie`。
 - **`-buildmode=c-archive` 必须 `AR=$OHOS_SDK/native/llvm/bin/llvm-ar`。** macOS 的
   `/usr/bin/ar`（cctools）拒收 ELF 成员，一个都不加**却返回 0** —— 静默产出 96 字节空库。
+  （这条是 **macOS 宿主特有**的坑；Linux 的 GNU `ar` 能吃 ELF，但统一写 `llvm-ar` 更省心。）
 - 用 `c-shared` 时 **`-race` 不可用**、`-msan` 不可行，`-asan` 可用。理由见
   `docs/go-upgrade-guide.md` §4.2。
 
@@ -152,7 +157,7 @@ go clean -cache          # 或用新的 GOCACHE 目录
 
 验收结论（每种 buildmode、sanitizer、TLS、x509 的实际可用性）在
 `docs/go-upgrade-guide.md` **§4.2**，每条都附设备上的实测证据。
-本 beta 的已知问题清单在 `docs/ohos-release-notes-v1.27.1-beta1.md`。
+本 beta 的已知问题清单在 `docs/ohos-release-notes-v1.27.1-beta2.md`。
 
 ## 上游跟进（这个移植怎么保鲜）
 
@@ -167,8 +172,8 @@ diff 与新上游 tag 逐文件对账**；**§4.1 那张「必须保留」的表
 每代都要盯的三处：`asm7.go` 的 optab case 号（arm64 TLS_GD 用的号会被上游占走）、
 `R_AMD64_TLS_GD` 的枚举值、`MustLinkExternal` 的两处副本。
 
-**判断拿到的是哪棵树的工具链**：`go version` 带 `-ohos` 后缀。不带的就是上游的
-（或 beta1 的 tarball，它早于这处标记）。
+**判断拿到的是哪棵树的工具链**：`go version` 带 `-ohos` 后缀。不带的就是上游的（或 beta1
+的 tarball，它早于这处标记）。
 
 ## 从源码重建（可选）
 
@@ -180,8 +185,13 @@ GOTOOLCHAIN=local GOPROXY=off GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec ./ma
 ```
 
 需要一个 **go1.24.6+** 的官方工具链当 bootstrap（`GOROOT_BOOTSTRAP` 或 `PATH`）。
-**Linux 宿主已实测可行**（Debian 13，用 `golang-1.25-go` 当 bootstrap）：`make.bash` EXIT=0、
-宿主自测全绿、`GOOS=openharmony GOARCH=arm64 go build` 通。注意 Debian 的
-`golang-1.24-go` 是 **1.24.4**，差一点点没够 1.24.6 的门槛 —— 装 1.25 那包。
-`-exec` 包装**不会被普通 `make.bash` 装上**（`cmd/dist/build.go` 的 `wrapperPathFor`
-只在交叉自举时命中），要按 `docs/go-upgrade-guide.md` §4.2 末尾那两条命令手装。
+**两个宿主都已实测**：
+
+- **darwin/arm64**：bootstrap 用 homebrew 的 `go`（`/opt/homebrew/opt/go/libexec`）。
+- **linux/amd64**（Debian 13，8 核）：bootstrap 用 `golang-1.25-go`，路径
+  `/usr/lib/go-1.25`。注意 Debian 的 `golang-1.24-go` 是 **1.24.4**，差一点点没够 1.24.6
+  的门槛 —— 装 1.25 那包。
+
+重建完要**手装 `-exec` 包装**：普通 `make.bash` **不会**装上它（`cmd/dist/build.go` 的
+`wrapperPathFor` 只在交叉自举时命中，且**它缺席时不会有任何提示**）。命令见
+`docs/go-upgrade-guide.md` §4.2 末尾。

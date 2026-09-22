@@ -429,17 +429,53 @@ GOTOOLCHAIN=auto  → go: downloading go1.28.0 (darwin/arm64)
 
 ---
 
-## ⑨ 下一次 cut 的待办（2026-09-23 定）
+## ⑨ 下一次 cut 的待办 ✅ 已闭环（2026-09-23，随 beta2 发出）
 
 1. **同时出 linux/amd64 tarball**（用户拍板）。宿主可行性已在 ④ 验过，打包配方见
    `docs/go-upgrade-guide.md` §6.8。
+   → **已出**：`go1.27.1-ohos-beta2-linux-amd64.tar.gz`（约 72 MiB；字节级凭据看同名
+   `.sha256`），在 238 上**本机全量重建**（不是交叉产出）后打的。GNU tar 用 `--transform` 改成员名，
+   排除列表比 macOS 那份长（从源码树直接打，开发脚手架还没被 rsync 排掉）。
 2. **先刷新 `~/go1.27.1-ohos`**，它与仓库的差只剩三处：⑤ 的 amd64 外链 delta、
    `VERSION` 的 `-ohos` 标记、以及 10 个上游签入的二进制 testdata
    （`src/cmd/objdump/testdata/go116.o`、`src/go/internal/{gccgoimporter,gcimporter}/testdata/*.a`）。
    **arm64 不受影响** —— 实测用它编 cgo 可执行文件拿到正确的 `Type: DYN` + musl 解释器，
    所以这不是「已发布的 beta1 坏了」。但这些差异**不该进下一个 tarball**。
+   → **已刷新**：按 §6.7 走 `rm -rf bin pkg` + `make.bash` + 手装 `-exec` 包装，
+   三连验收绿（含设备侧 `ok strings 24.874s`）。
 3. **打包源必须是从仓库 `make.bash` 出来的树**，不是已装树 —— 否则 ⑧ 那类
    「只在产物里对、仓库里没有」的手工改动会继续以不可复现的方式往下传。
+   → **已守**：两份包都出自「从仓库同步 + `rm -rf bin pkg` + `make.bash`」的树。
+   验收硬判据：`strings bin/go | grep -c '<树的绝对路径>'` 两份都是 **0**（release 标志在）。
+
+**遗留的一条不对称（beta2 带着它发出去了，见 ⑩）**：B 层与 C 层是在 **beta1 那棵树上**
+测的，beta2 没重跑。判断「delta 对 arm64 只涉及构建期平台表 / 版本串 / 宿主侧测试数据」
+是**推断不是实测**，release notes 里如实这么写的。
+
+**本 cut 顺手补的一个真缺口**：CI 此前只验「能编**出**工具链」，不验「打**出来**的包能用」。
+`build.go` 的 release 闸门（`-trimpath` 等）此前**没有任何自动防线** —— 它失效的症状是
+`bin/go` 里嵌着构建树绝对路径，而 `make.bash` 退出码照样是 0（§6.8 那条踩过的坑）。
+已在 `.github/workflows/ohos.yml` 加「打包自检」：打包 → 解到临时目录 → 版本串带 `-ohos`
+→ 绝对路径为 0 → **从解出来的树**编一个 arm64 产物。
+
+---
+
+## ⑩ 下一次 cut 的待办（2026-09-23 定）
+
+1. **B 层要在「发布树」上重跑，而现有驱动会假装已经跑过了。**
+   `misc/openharmony/runtests.sh` 把结论追加进 `results.tsv`，**重跑时自动跳过已 PASS 的包** ——
+   在一棵改过的树上重跑，它会把**上一轮的 PASS 直接当本轮结论**用掉，看着全绿。
+   要拿当轮真结果必须 `--force`，或先把 `results.tsv` 挪走。
+   **这是测试载体自己造出来的「sweep 全绿≠没缺陷」**，与 ⑧ 那条同源：
+   载体说「测过了」，但它说的「测过」指的是另一棵树。
+
+   修法（小）：每条结果带上树指纹（`git rev-parse HEAD^{tree}` 或 `bin/go` 的 sha256），
+   跳过只在指纹相同时生效。**在那之前，B 层的结论必须连带说明它是在哪棵树上跑的** ——
+   beta2 就是这么如实标注的。
+
+2. **linux 那台（238）没有 OHOS SDK**，所以那边的 tarball 验收只覆盖到「arm64 产物正确 +
+   amd64 报错正确」，**amd64 的真产物形状在 Linux 侧一次都没验过**（只在 macOS 上验过）。
+   要补就装个 commandline-tools 到 238；不补也不算盲区，因为 amd64 的构建路径与宿主无关。
 
 ---
 

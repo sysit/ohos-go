@@ -341,23 +341,45 @@ OHOS 在 `go_test.go` 定义了 `goos`（= "openharmony" when IsOpenharmony）�
 ```bash
 cd ~/projects/ohos-go
 rsync -a --delete \
-  --exclude '.git/' --exclude 'bin/' --exclude 'pkg/' --exclude 'go.env' \
+  --exclude '.git/' --exclude 'bin/' --exclude 'pkg/' \
   --exclude 'src/cmd/dist/dist' --exclude '.DS_Store' \
   --exclude '.claude/' --exclude 'CLAUDE.md' --exclude 'resume.sh' \
+  --exclude 'ohos-test-results*' \
+  --exclude 'misc/openharmony/loopbackhap/.hvigor/' \
+  --exclude 'misc/openharmony/loopbackhap/entry/build/' \
+  --exclude 'misc/openharmony/loopbackhap/local.properties' \
   ./ ~/go1.27.1-ohos/
-cd ~/go1.27.1-ohos/src && GOTOOLCHAIN=local GOPROXY=off \
+cd ~/go1.27.1-ohos && rm -rf bin pkg
+cd src && GOTOOLCHAIN=local GOPROXY=off \
   GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec ./make.bash
 cd ../misc && ../bin/go build -o ../bin/go_openharmony_arm64_exec ./go_openharmony_exec
 cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 ```
 
-三处必须排除，各有原因：
+排除项各有原因：
 
-- **`go.env`**：发布树里是 `GOTOOLCHAIN=local`（外加一段说明），源码树是上游的 `auto`。
-  反向覆盖会让这棵树有被自动换掉的风险 —— 而上游工具链编不出 `GOOS=openharmony`。
-  没有任何 dist 代码会写这个文件，那个 `local` 是手工改的，同步时别冲掉。
-- **`bin/`、`pkg/`**：构建产物，交给 `make.bash` 自己维护。
+- **`bin/`、`pkg/`**：构建产物，交给 `make.bash` 自己维护。但**排除了不等于不用管** ——
+  这两棵子树里是上一版的产物，而 `make.bash` 是增量的，所以下面那条 `rm -rf` 不能少。
+- **`ohos-test-results*`**：全量测试的落盘目录。它不是源码，`--delete` 会顺手删掉，
+  所以显式豁免（rsync 的 `--delete` 不会删被排除的路径）。
+- **`loopbackhap/.hvigor/`、`loopbackhap/entry/build/`、`loopbackhap/local.properties`**：
+  DevEco 自己的文件。在仓库里由夹具的 `.gitignore` 挡着，但 **rsync 不读 `.gitignore`**，
+  不排就会被拷进发布树。`local.properties` 里是**打包机器上 DevEco SDK 的绝对路径**
+  （一行 `sdk.dir=/Applications/...`），对别人既没用又碍事。
+  > **`--exclude` 只挡「拷进去」，不挡「已经在那儿」。** `--delete` 默认不清被排除的路径
+  > （排除项是受保护的），所以上一次同步漏进去的那份**会变成钉子户**：2026-09-23 实测，
+  > 排除项加好之后 `local.properties` 照样在装好的树里，得手工 `rm` 一次。
+  > 判据是打包前 `tar tzf ... | grep local.properties`。
+  > （`--delete-excluded` 能根治，但它会连 `ohos-test-results*` 一起删 —— 那是数据，别用。）
 - **`.claude/`、`CLAUDE.md`、`resume.sh`**：本仓库的开发脚手架，不属于 Go 发行版。
+
+> **`go.env` 已从排除列表里去掉**（2026-09-23）。以前必须排：只有已装树那份是手改的
+> `GOTOOLCHAIN=local`，源码树还是上游的 `auto`，同步会把它冲掉。现在源码树也是 `local`
+> （roadmap ⑧，`.github/workflows/ohos.yml` 里有断言守着），两棵树逐字相同 ——
+> 让仓库当唯一事实源比两处手工维护省事。
+
+> **`rm -rf bin pkg` 不能省。** `make.bash` 是增量的，只重编它发现的变更；上一版留下的、
+> **没带 release 标志**的工具二进制会被原样留下，而它每次退出码都是 0。判据见 §6.8。
 
 `-exec` 包装仍需手装：普通 `make.bash` 的 `goos == gohostos`，`wrapperPathFor` 返回空（见 §4.2）。
 
@@ -368,6 +390,14 @@ cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 cd ~/go1.27.1-ohos/src && ../bin/go tool dist test -run=misc:execwrapper
 PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go test strings
 ```
+
+> **这条验收不会污染发布构建 —— 已实测排除。** 第二条的 `dist test` 会按 `toolenv()`
+> 重装一遍工具链（`build.go:1404` 那份 release 标志就是给它用的），第三条会编出目标架构
+> 工具链（在 `bin/openharmony_*`、`pkg/tool/openharmony_*`，打包时排掉）。
+> 2026-09-23 实测：刚 `make.bash` 完（阶段 A）与跑完 `dist test`（阶段 B）逐字节相同
+> （`bin/go` 16069938、`gofmt` 2972978、`compile` 27078882，绝对路径计数均为 0）。
+> 所以验收顺序不必躲 —— **树变「非 release」的来源只有 §6.8 那条增量 `make.bash`
+> 留旧产物**，别把两件事混起来查。
 
 ### 6.8 打发布 tarball
 
@@ -392,34 +422,92 @@ PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go tes
 > 且 `pkg/tool/darwin_arm64/{compile,link,asm,cgo}` 的 sha256 应与本仓库的一致。
 > 不符就 **`rm -rf bin pkg` 后重跑 `make.bash`**（强制全量，别指望增量自己发现）。
 
+命名 `<tag>-<宿主>`：`go1.27.1-ohos-beta2-darwin-arm64.tar.gz` / `...-linux-amd64.tar.gz`。
+**刻意不与官方 `go1.27.1.*` 同名**，免得装串。
+
+从 §6.7 刷出来的安装树打（推荐，成员名天然就是 `go1.27.1-ohos`，且开发脚手架已被 rsync 排掉）：
+
 ```bash
-cd ~ && tar czf /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz \
-  --exclude='go1.27.1-ohos/ohos-test-results' \
-  --exclude='go1.27.1-ohos/ohos-test-results-*' \
+cd ~ && tar czf /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
+  --exclude='go1.27.1-ohos/ohos-test-results*' \
+  --exclude='go1.27.1-ohos/bin/openharmony_*' \
+  --exclude='go1.27.1-ohos/pkg/tool/openharmony_*' \
   --exclude='.DS_Store' \
   go1.27.1-ohos
-shasum -a 256 /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz \
-  | tee /tmp/go1.27.1-ohos-beta1-darwin-arm64.tar.gz.sha256
+shasum -a 256 /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
+  | tee /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz.sha256
 ```
+
+> **那两个 `openharmony_*` 排除项是 2026-09-23 补的，别删。** 在装好的树上跑过设备测试之后，
+> 树里会多出 `bin/openharmony_arm64/` 与 `pkg/tool/openharmony_arm64/` —— 那是 `-exec` 包装
+> **自己按需编出来的目标架构工具链**（`misc/go_openharmony_exec/main.go:239`，日志里那句
+> `building the openharmony/arm64 toolchain (one time)`），**是缓存不是发行内容**：
+> 它 `Stat` 一下不存在就现编，没有也照常工作。
+> 不带这两条的话包里会多约 200 MB（实测 69 MiB → 247 MB），而**条目数只多 30 来条** ——
+> 只看 `tar tzf | wc -l` 是发现不了的，必须看字节数。
+
+**直接从源码树打（Linux 上常见，省一次 285 MB 的 rsync）**：树本身还带着 `.claude/`、
+`CLAUDE.md`、`resume.sh` 这些开发脚手架，**必须自己排**；且目录名是 `ohos-go` 不是
+`go1.27.1-ohos`，要用 GNU tar 的 `--transform` 改成员名（BSD tar 无此参数）：
+
+```bash
+# 这台没有 / 上的空间，tar 落到 /opt（同一台机器上 df 挑大的那个盘）
+cd /root/ohos-go && tar czf /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
+  --transform='s,^\.$,go1.27.1-ohos,' --transform='s,^\./,go1.27.1-ohos/,' \
+  --exclude='./.git' --exclude='./.claude' --exclude='./CLAUDE.md' --exclude='./resume.sh' \
+  --exclude='./ohos-test-results*' --exclude='.DS_Store' \
+  --exclude='./bin/openharmony_*' --exclude='./pkg/tool/openharmony_*' \
+  --exclude='./misc/openharmony/loopbackhap/.hvigor' \
+  --exclude='./misc/openharmony/loopbackhap/entry/build' \
+  --exclude='./misc/openharmony/loopbackhap/local.properties' \
+  .
+sha256sum /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
+  | tee /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz.sha256
+```
+
+> `--transform` 那条**必须拆成两个**：只写 `^\./` 的话，`tar ... .` 产生的那个裸 `.`
+> 成员匹配不上，包里会多一条 `./` 成员（无害，但与另一份包形状不一致，比对时会误判）。
 
 - **解包后必须落到 `go1.27.1-ohos/`**（`tar` 的成员名就是它）。下游默认
   `OHOS_GO_ROOT=$HOME/go1.27.1-ohos`，改名字等于多一步配置。
-- **`ohos-test-results*` 是唯一必须排的东西**（本仓库跑全量测试的落盘目录，约 29 MB）。
+- **`ohos-test-results*` 是唯一必须排的东西**（本仓库跑全量测试的落盘目录，约 29 MB ×N轮）。
   `.DS_Store` 是习惯性排除。**`pkg/openharmony_arm64_dynlink` 不用排** ——
   那只是 `-buildmode=shared` 能力测试的宿主产物，本树里根本没有（`pkg/` 只有 `include` 与 `tool`）。
-- 命名刻意**不与官方 `go1.27.1.*` 同名**，免得装串。
+- **包体约 70 MiB，条目约 17.5k。** 明显更大就是排漏了，**而且要先看字节数、别先看条目数** ——
+  目标架构工具链缓存那 200 MB 只对应三十几条条目，`wc -l` 完全看不出来。
 
 打完的验收（**这一步不能省，它验的是「交出去的那个文件」而不是「你本地那棵树」**）：
 
 ```bash
-tar tzf <tarball> | grep -E 'ohos-test-results|\.DS_Store'    # 必须为空
-cd /tmp && tar xzf <tarball> && /tmp/go1.27.1-ohos/bin/go version
-# 再解出一棵新树、用它编一个 cgo 可执行文件，确认 PIE + musl 解释器：
-readelf -l app | grep INTERP          # → /lib/ld-musl-aarch64.so.1
+F=<tarball>
+tar tzf $F | grep -E 'ohos-test-results|\.DS_Store|\.hvigor|resume\.sh'   # 必须为空
+tar tzf $F | wc -l                                        # ≈17400，暴增说明排漏了
+mkdir -p /tmp/accept && tar xzf $F -C /tmp/accept
+A=/tmp/accept/go1.27.1-ohos
+$A/bin/go version                                         # 必须带 -ohos
+strings $A/bin/go | grep -c "$(pwd)"                      # 必须为 0（release 标志在）
+$A/bin/go tool dist list | grep openharmony               # 两个目标都在
 ```
 
-最后那条是关键：**新解出来的树必须自己就能产出可用产物** ——
-只跑 `go version` 会漏掉「`pkg/tool` 没打进去」这类缺陷。
+**再解出一棵新树、用它编一个产物**（只跑 `go version` 会漏掉「`pkg/tool` 没打进去」这类缺陷）：
+一定要**从这个 tarball 里解出来的树**编，不是从本地那棵编。
+
+```bash
+export PATH=$A/bin:$PATH GOCACHE=/tmp/accept/.cache
+mkdir -p /tmp/accept/work && cd /tmp/accept/work
+printf 'package main\nimport ("fmt";"net";"os")\nfunc main(){c,_:=net.Dial("tcp","1.1.1.1:53");fmt.Println(os.Args[0],c)}\n' > main.go
+# arm64：纯 Go 就够 —— 默认 PIE 会自己带上 musl 解释器，不需要 SDK
+GOOS=openharmony GOARCH=arm64 CGO_ENABLED=0 go build -o app main.go
+readelf -l app | grep INTERP     # → /lib/ld-musl-aarch64.so.1
+# amd64：纯 Go 必须失败，且必须是这一句（这是 7b 修复的断言，不是意外）
+GOOS=openharmony GOARCH=amd64 CGO_ENABLED=0 go build -o app64 main.go 2>&1 \
+  | grep -q 'requires external (cgo) linking' && echo "7b OK"
+```
+
+- **amd64 的「能编出产物」这一条在没装 OHOS SDK 的机器上验不了**（强制外部链接 ⇒ 要 clang）。
+  所以拿 238（Linux，无 SDK）做验收时，覆盖面是「arm64 产物正确 + amd64 报错正确」，
+  真正的 amd64 产物形状在 macOS 那份上用 `-buildmode=c-shared` 验（见 §4.3）。
+- `readelf` 在 macOS 上不自带，用 `$OHOS_SDK/native/llvm/bin/llvm-readelf`。
 
 ---
 
