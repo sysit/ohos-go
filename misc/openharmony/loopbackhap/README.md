@@ -1,6 +1,14 @@
-# loopbackhap —— 应用域能不能 bind 127.0.0.1？
+# loopbackhap —— 应用域的权限边界探针
 
-## 这个夹具回答什么问题
+这个夹具回答**两个**都只能靠「换个权限域再问一次」才能回答的问题：
+
+1. 应用域能不能 bind/listen `127.0.0.1`？（`LoopProbeAbility`）
+2. 应用域能不能读到系统 CA 根？（`CertProbe`，见下半篇）
+
+两个问题的共同形状：**同一个操作，`sh` 域失败、应用域成功** ——
+所以「设备上做不到」这个结论在只观察过 `sh` 域时是不成立的。
+
+## 问题一：应用域能不能 bind 127.0.0.1？
 
 B 层全量（262 个 std 包交叉编译 + 设备执行）里有 **17 个包**（`net`、`net/http`、
 `internal/trace`、`os/exec` 一族……）的 FAIL 都指向同一个症状：用例要在 `127.0.0.1`
@@ -46,7 +54,7 @@ cd misc/openharmony/loopbackhap
 
 hdc install -r entry/build/default/outputs/default/entry-default-unsigned.hap
 hdc shell aa start -a LoopProbeAbility -b com.9bt.ohosloop
-hdc shell hilog -x | grep LoopProbe          # 或先 hdc shell hilog -r 清缓冲
+hdc shell hilog -x | grep -E 'LoopProbe|CertProbe'   # 两组探针，或先 hilog -r 清缓冲
 ```
 
 **模拟器上不需要签名。** 上表那条 `hdc install` 装的是 `-unsigned.hap`，
@@ -88,6 +96,86 @@ LoopProbe  === LoopProbe DONE ===
 五个探针全部 OK，进程 uid `20020077`（应用域）。独立旁证：同一个模拟器上
 `com.9bt.transmissionbtm`（uid `20020076`）能 bind `0.0.0.0:51413` 与 `[fe80::…]:51413`。
 **结论：17 包环回类是 `sh` 权限域限制，非 port 缺陷。**
+
+## 问题二：应用域能不能读到系统 CA 根？
+
+### 为什么问
+
+B 层 `crypto/x509` FAIL，唯一报错是 `cert_pool_test.go:20: open /etc/ssl/certs: permission denied`
+（出自 `TestCertPoolEqual` —— 它的**主题是池子相等语义**，`SystemCertPool()` 只是被 `t.Fatal`
+护着的前置步骤。**所以这条 FAIL 说明的是「设备上取不到系统根」，不是「x509 坏了」**）。
+
+release notes 当初据此让下游设 `SSL_CERT_FILE`，但那个处方有个已知硬伤：**包装不下发宿主 env**。
+而更要紧的是另一个可能 —— `SystemCertPool()` 有三种结局，对下游意义完全不同
+（`crypto/x509/root.go:153` `loadOnDiskRoots`）：
+
+| `/etc/ssl/certs` | 结果 | 下游 |
+|---|---|---|
+| 可读且有 PEM | 返回系统根 | HTTPS ✅ |
+| EACCES | 返回 error | HTTPS ❌ **响亮失败**（当时的状态） |
+| ENOENT | **空池 + nil** | HTTPS ⚠️ **静默失败**（`roots.len()==0 && firstErr==nil` 走 `root.go:199`） |
+
+第三格最坏：不报错，等 TLS 握手才报 unknown authority。而 `sh` 域观测到的 EACCES
+（或 ENOENT）**不能外推** —— 环回那件事已经证明同一操作在两域结论相反。
+
+### 探针
+
+`entry/src/main/ets/entryability/CertRootProbe.ets`，在环回那组跑完后由
+`LoopProbeAbility.runProbes()` 调起（同一进程、同一域）。逐路径 `open` 并分三态报出，
+再对同一批路径 `lstat` 一次：
+
+| 探针 | 路径 | 问什么 |
+|---|---|---|
+| A | `/etc` | 可搜索 vs 可读的分界 |
+| B | `/etc/ssl/certs` | **Go 的 `certDirectories[0]`**，EACCES 的来源 |
+| C | `/etc/ssl/certs/cacert.pem` | 镜像里的主 bundle（**不在** Go 的 `certFiles` 里） |
+| D | `/etc/ssl/cert.pem` | 在 Go 的 `certFiles` 里（`root_linux.go:16`） |
+| E | `/system/etc/ssl/certs/cacert.pem` | system 分区那份 |
+| F | `/data/certificates/user_cacerts` | OHOS 用户 CA（对应 Android 的 `certs-added`） |
+| S* | 同上各路径 | `lstat`：**是不是 symlink**（见下，这条是隐藏杀手） |
+
+**为什么必须单独问 symlink**：Go 的 `readUniqueDirectoryEntries`（`root.go:206`）会跳过
+**目标串里不含 `/` 的 symlink**。而 `/etc/ssl/certs` 下**只有 `cacert.pem` 一个条目** ——
+若它是同目录软链，Go 会把它剔掉 → 空池 + nil error，正是上表最坏那格。
+A–F 的 `open` 会跟着软链走，**看不出来**。
+（ArkTS 的 `fs` 没有 `readlink`，只有 `lstat` ——够用：不是软链，问题就不存在。）
+
+### 实测结果（2026-09-22，模拟器 `127.0.0.1:5555`，uid `20020077`）
+
+```
+A /etc                        -> OPEN OK isDir=true entries=202[CollaborationFwk,...]
+B /etc/ssl/certs              -> OPEN OK isDir=true entries=1[cacert.pem]
+C /etc/ssl/certs/cacert.pem   -> OPEN OK isDir=false size=191450 head="-----BEGIN CERTIFICATE--"
+D /etc/ssl/cert.pem           -> code=13900002 No such file or directory
+E /system/etc/ssl/certs/cacert.pem -> OPEN OK isDir=false size=191450 head="-----BEGIN CERTIFICATE--"
+F /data/certificates/user_cacerts  -> code=13900012 Permission denied
+SC lstat /etc/ssl/certs/cacert.pem -> symlink=false
+SF lstat /data/certificates/user_cacerts -> symlink=false
+SA lstat /etc                 -> code=13900012 Permission denied   ← 但 A 读得到，见下
+```
+
+**结论：应用域读得到系统根，Go 上游默认路径本来就覆盖 OHOS —— 不需要任何 env。**
+逐环对齐（`root.go:183-197`）：`ReadDir` 成功（B）→ 条目非软链（SC）→ `ReadFile` 成功（C）
+→ 同一份字节在宿主上 `AppendCertsFromPEM` **125/125 成功** → `roots.len() > 0` → `root.go:199` 返回池子。
+
+上游 6 个 `certFiles` 在 OHOS **全 ENOENT**（探针 D 是一个样本；ENOENT 被 `os.IsNotExist` 忽略，
+不占 `firstErr`），但 `certDirectories[0] = "/etc/ssl/certs"` 正好命中。
+
+**顺带证伪了「x509 需设 `SSL_CERT_FILE`」那条处方** —— 那是把 `sh` 域限制当成了平台限制。
+
+**真正的缺口只剩一条**：`F` 得 EACCES（而 `SF` 的 `lstat` 成功 ⇒ 该目录**存在**，只是不给应用读）
+→ **用户自装 CA 取不到**。上游给 Android 加的两行（`root_linux.go:26-30`）照抄无效，
+因为问题不是路径不对是权限不给。要支持得走 OHOS cert framework + cgo，是真特性不是补丁。
+
+`SA` 得 EACCES 而 `A` 读得到，看似矛盾，其实不是：`lstat("/etc")` 要的是 `/etc` 自身的 `getattr`，
+`open("/etc")` 要的是 `search`+`open`+`read`，OHOS 的策略在这两者上不同。**Go 不 lstat `/etc`**，无关结论。
+
+**没做的**：没在应用域里跑真的 Go 二进制。证据是逐 syscall 对齐的，不是端到端的 ——
+剩下的推断只有「ArkTS 的 `open` ≡ Go 的 `open`」。要端到端铁证得建 native 载体
+（HAP + Go c-shared `.so` + N-API 胶水），判断是不值得。
+
+两组探针在**同一次** `aa start` 里串行跑完（`LoopProbeAbility.runProbes()` 尾部调
+`probeCertRoots()`），所以构建、安装、启动都只有一次。
 
 ## 工程文件是怎么来的（别手写那两个 json5）
 

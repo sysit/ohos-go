@@ -24,6 +24,7 @@ import { UIAbility } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { probeCertRoots } from './CertRootProbe';
 
 const DOMAIN: number = 0x9b01;
 const TAG: string = 'LoopProbe';
@@ -124,6 +125,10 @@ export default class LoopProbeAbility extends UIAbility {
       await selfConnectThenClose(srv);
     }
     log('=== LoopProbe DONE ===');
+
+    // 同一个应用域里的第二个问题：系统 CA 根读不读得到。分开成独立文件，
+    // 免得动到上面这组已被文档引用的 A–E 探针。
+    probeCertRoots();
   }
 }
 
