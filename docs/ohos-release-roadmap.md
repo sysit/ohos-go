@@ -330,25 +330,71 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 
 ---
 
-## ⑥ 零 CI（P2，但这是 beta/release 的真正分界）
+## ⑥ 零 CI ✅ 已补（2026-09-22）
 
-`.github/` 下没有 workflows。这个 port 的每一次验证都是手工一次性、结论记在散文里。
-**下一个 commit 可以静默弄坏 arm64 而没人知道。**
+新增 `.github/workflows/ohos.yml`。此前这个 port 的每一次验证都是手工一次性、结论记在
+散文里 —— **下一个 commit 可以静默弄坏 arm64 而没人知道**。
 
-**先认下的限制**：设备侧要模拟器 + `hdc`，放 GitHub runner 上不现实。
-所以 CI 只能覆盖宿主侧 + 交叉编译，**设备侧仍靠手工** —— 这是要接受的，不是要解决的。
+**先认下的限制**：设备侧要模拟器 + `hdc`，放 GitHub runner 上不现实。所以 CI **只覆盖
+宿主侧**，设备侧仍靠 `misc/openharmony/runtests.sh` 手工跑。**它保证的是「宿主编译器
+没坏」，不是「产物能跑」** —— 这两层本来就不互相背书。
 
-最小形态：`make.bash` + `runtests.sh` 里宿主可跑的部分 + 一条 `GOOS=openharmony go build`。
+| job | 触发 | 干什么 |
+|---|---|---|
+| `host` | 每 push / PR，`ubuntu-latest` + `macos-14` 双宿主 | `make.bash` → 版本串断言带 `-ohos` → 9 个承重包的宿主测试 → misc 包装单元测试 → 交叉编译冒烟 |
+| `all-bash` | 仅夜间 schedule / 手动 | 全量 `./all.bash`。太重，不参与 PR 门禁，但它是唯一能证明「基线没坏」的一层 |
+
+**冒烟是双向断言**，这是它的要点：`arm64` 纯 Go **必须成功**（内部链接，不需要 SDK）；
+`amd64` 纯 Go **必须失败**，且必须是 `requires external (cgo) linking` 那句 ——
+它若**成功**，说明 ⑤ 修的那条 delta 丢了。9 个包里 `cmd/dist` 是关键那个：
+它的 `TestMustLinkExternal` 逐格比对 `MustLinkExternal` 的两处副本。
+
+**刻意不做 GOCACHE 缓存**：陈旧缓存会让 reloc 枚举编号漂移，链接期报
+`unknown reloc to ...: 105 (RelocType(105))`（本项目反复踩过）。每次从零编译换确定性。
+
+**每条命令都先在本地按原样跑过**（darwin/arm64 + 仓库 `bin/go`，含 `GOPROXY=off`
+的 CI 同款 env），不是写完就推。
+
+**首跑结果**：`宿主侧 (ubuntu-latest)` 4m7s ✅、`宿主侧 (macos-14)` 5m24s ✅、
+`all-bash` 按设计跳过。**两个宿主都绿** —— 顺带把「Linux 宿主的 CI 等价物」也证了。
+
+**linux/amd64 的 A 层基线：全绿。** 在 `172.16.1.238` 上用**空的 GOCACHE** 跑了完整
+`./all.bash`（8 核约 25 min）：**377 包 ok / 0 FAIL**。这条是夜间 job 的期望值 ——
+**先量出基线再设期望**，否则一上线就是个红的 job。
+
+> 量基线时踩了一个**同步假红**，值得记：第一次跑出 `cmd/api` 的 `TestGolden` 失败
+> （`open testdata/src/pkg: no such file or directory`）。原因是我 rsync 时写了
+> `--exclude 'pkg/'` —— 这模式**匹配任意深度**的 `pkg/` 目录，把上游签入的
+> `src/cmd/api/testdata/src/pkg` 与 `src/simd/testdata/pkg` 一起排掉了。
+>
+> **树本身没问题**：`.gitignore` 用的是锚定的 `/pkg/`，这两个目录正常受版本控制，
+> 上游存在性对账 0 缺失（见 `go-upgrade-guide.md` §3.5）。加上锚定斜杠后 `cmd/api` 转 `ok`。
+> **教训：假红不一定来自环境，也可能来自你自己的搬运方式** —— 与 ①② 那两条
+> 「`sh` 域观测不可信」是同一类错误的另一个面。
 
 ---
 
-## ⑦ 上游跟进节奏：没人承诺（需你决策）
+## ⑦ 上游跟进节奏 ✅ 已定（2026-09-22，用户拍板）
 
-合并剧本（`docs/go-upgrade-guide.md` + `.claude/skills/merge-upstream/`）是本项目最好的可复用资产，
-但「谁来合、多久合一次」是空的。beta 可以是一次性快照；
-release 意味着有人跟着 go1.28、go1.29 走，否则半年后它是一棵没人敢升的死树。
+**三条决定**：
 
-**这条不是技术问题，是承诺问题。**
+1. **节奏**：跟上游 **minor**（go1.27.x 的安全修复 —— 下游全是做 TLS 代理的，对
+   CVE 敏感）**+ major**（go1.28）。
+2. **谁执行**：Claude 执行、用户审。上游 tag 出现后按 `docs/go-upgrade-guide.md` +
+   `.claude/skills/merge-upstream/` 合并 → 跑三层验证 → 交一份「残留 diff 对账 +
+   三层结果」的结论，**用户点头才推**。用户的持续投入接近零，只在合不动时被叫。
+3. **承诺措辞**：**跟随上游 minor；major 合并视验证情况，不承诺时间窗。**
+   写进 release notes 与 `docs/ohos-toolchain-install.md`（后者的「上游跟进」一节
+   是给下游看的落点）。
+
+**为什么这条值钱**：合并剧本是本项目最好的可复用资产，但「谁记得去看上游有没有
+发新版」原来是空的。beta 可以是一次性快照；release 意味着有人跟着 go1.28、go1.29
+走，否则半年后它是一棵没人敢升的死树。
+
+**尚未解决的一半：触发。** 现在仍靠「用户看到上游发版时喊一声」。
+备选是加一条定时 workflow（`git ls-remote` 比 tag，发现新的就开 issue）—— 那样
+「谁记得」不依赖任何人。**暂未做**：开 issue 是对外的副作用，等用户点头再说
+（也正因为如此，没有用会话内定时器 —— 它 7 天就过期，对「每月看一眼」是错的工具）。
 
 ---
 

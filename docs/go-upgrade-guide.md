@@ -140,6 +140,7 @@ comm -23 /tmp/up.txt /tmp/local.txt        # 输出必须为空
 | 链接器跳过 | `cmd/link/link_test.go`（race detector skip `|| runtime.IsOpenharmony`） |
 | 默认 PIE | `internal/platform/supported.go` 的 `DefaultPIE`（`case "android", "ios", "openharmony"`）——去掉它，cgo 可执行文件就会退回 `Signal 11` |
 | ELF 解释器 | `cmd/link/internal/ld/elf.go` 的 `case objabi.Hlinux`（openharmony → 直接用 `LinuxdynldMusl`，**不做宿主探测**） |
+| CI | `.github/workflows/ohos.yml` —— 上游 `golang/go` 没有 workflows，合并不会冲突，**但它守的是这张表本身**（amd64 外链、DefaultPIE、平台登记都被它断言）。丢了它，这张表就退回「只有散文记录」 |
 
 ### 4.2 能力实测结论（2026-09，go1.27.1）
 

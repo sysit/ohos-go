@@ -1,0 +1,167 @@
+# OpenHarmony 移植的宿主侧 CI。
+#
+# **覆盖范围是刻意划死的**：只覆盖宿主侧（重建工具链 + 移植承重的那些包的宿主
+# 测试 + 交叉编译冒烟）。设备侧**不覆盖** —— 那要模拟器 + hdc，放 GitHub runner
+# 上不现实，仍靠手工（`misc/openharmony/runtests.sh`，见 docs/ohos-full-test-plan.md）。
+#
+# 所以这个 workflow 保证的是「宿主编译器没坏」，**不是**「产物能跑」。
+# 这三层结论互不背书，是本项目反复吃过的教训（见 docs/ohos-release-roadmap.md ⑥）。
+
+name: ohos
+
+on:
+  push:
+    branches: ['ohos-*']
+  pull_request:
+    branches: ['ohos-*']
+  schedule:
+    # 每天一遍全量 A 层。整点会挤，挑 :23。
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # src/go.mod 写 go 1.27 —— GOTOOLCHAIN=auto 下 bootstrap 会去下官方 go1.27，
+  # 而官方工具链编不出 GOOS=openharmony，结局是一句难懂的构建失败。
+  GOTOOLCHAIN: local
+  GOPROXY: off
+
+jobs:
+  host:
+    name: 宿主侧 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # 两个宿主都实测过：ubuntu = linux/amd64（在 172.16.1.238 上验的），
+        # macos-14 = darwin/arm64（发布 tarball 的那个宿主）。
+        # 加宿主不是为了覆盖率好看 —— delta 里有宿主相关的分支（cmd/dist 的自举、
+        # misc 包装、AR 的形态），单宿主看不出来。
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      # bootstrap 必须 >= go1.24.6。别降到 1.24 —— Debian 那包是 1.24.4，差一点点。
+      # 刻意关掉 setup-go 的缓存：这里没有任何模块依赖，缓存只增加不确定性。
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      # 不要给 GOCACHE 加 actions/cache。陈旧缓存会让 reloc 枚举编号漂移，链接期报
+      # `unknown reloc to ...: 105 (RelocType(105))` —— 本项目反复踩过的坑。每次
+      # 从零编译的代价换的是确定性。
+      - name: 重建工具链
+        run: |
+          cd src
+          GOROOT_BOOTSTRAP="$(go env GOROOT)" ./make.bash
+
+      # 断言「带 fork 标记」而不是具体版本号 —— 否则每次合并上游都要改 CI。
+      - name: 版本串带 fork 标记
+        run: |
+          cd src
+          v=$(../bin/go version)
+          echo "$v"
+          case "$v" in
+          *-ohos*) ;;
+          *)
+            echo "::error::版本串里没有 -ohos 标记：$v"
+            exit 1
+            ;;
+          esac
+
+      # cmd/dist 那份 TestMustLinkExternal 逐格比对 MustLinkExternal 的两处副本
+      # （internal/platform/supported.go 与 cmd/dist/build.go）。漏一处就红 —— 这是
+      # amd64 强制外链那条 delta 唯一的自动防线。
+      - name: 宿主测试（移植承重的那些包）
+        run: |
+          cd src
+          ../bin/go test -count=1 \
+            ./cmd/dist \
+            ./internal/platform \
+            ./internal/testenv \
+            ./cmd/internal/objabi \
+            ./cmd/internal/obj/arm64 \
+            ./cmd/internal/obj/x86 \
+            ./cmd/link/internal/ld \
+            ./cmd/go/internal/work \
+            ./cmd/go/internal/load
+
+      # misc/ 的测试没有别的自动入口（dist 里注册的是 misc:execwrapper，就是这一条）。
+      - name: misc 包装的单元测试
+        run: |
+          cd misc
+          ../bin/go test -count=1 ./go_openharmony_exec
+
+      - name: 交叉编译冒烟
+        run: |
+          set -eu
+          GO="$GITHUB_WORKSPACE/bin/go"
+          rm -rf /tmp/smoke && mkdir -p /tmp/smoke && cd /tmp/smoke
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+          	"fmt"
+          	"net"
+          	"os"
+          )
+
+          // 用 net.SplitHostPort 是为了逼出 g 寄存器重载 —— 这正是 amd64 上会发
+          // R_AMD64_TLS_GD 的那处，也是这条冒烟要守的东西。
+          func main() {
+          	host, port, err := net.SplitHostPort("127.0.0.1:5138")
+          	if err != nil {
+          		fmt.Fprintln(os.Stderr, err)
+          		os.Exit(1)
+          	}
+          	fmt.Println(host, port)
+          }
+          EOF
+          "$GO" mod init smoke
+
+          # arm64：纯 Go 走内部链接，不需要 SDK，所以这条在 runner 上能真跑。
+          env GOOS=openharmony GOARCH=arm64 CGO_ENABLED=0 \
+            "$GO" build -o app-arm64 .
+          test -s app-arm64
+
+          # amd64：必须**失败**，且必须是那句可读的报错。
+          # 失败才是正确行为 —— amd64 每次构建都强制外部链接（那条 delta 让
+          # `cannot handle R_AMD64_TLS_GD ... when linking internally` 这句 Fatalf
+          # 变成一句指方向的提示）。它若成功，说明 delta 丢了。
+          if out=$(env GOOS=openharmony GOARCH=amd64 CGO_ENABLED=0 \
+                     "$GO" build -o app-amd64 . 2>&1); then
+            echo "::error::amd64 纯 Go 构建居然成功了 —— MustLinkExternal 那条 delta 可能丢了"
+            exit 1
+          fi
+          case "$out" in
+          *"requires external (cgo) linking"*)
+            echo "amd64 按预期拒绝：$out"
+            ;;
+          *)
+            echo "::error::amd64 的报错不是预期的那句：$out"
+            exit 1
+            ;;
+          esac
+
+  # 每次都跑太重（runner 上 ~30 min），但它是唯一能证明「基线没坏」的一层 ——
+  # go1.26.5 那代的静默 FIPS 缺陷正是在全绿的全量轮里躲过去的，不能省。
+  # 所以放夜里，不参与 PR 门禁；门禁由上面的 host job 承担。
+  all-bash:
+    name: A 层全量 ./all.bash
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - name: ./all.bash
+        run: |
+          cd src
+          GOROOT_BOOTSTRAP="$(go env GOROOT)" ./all.bash

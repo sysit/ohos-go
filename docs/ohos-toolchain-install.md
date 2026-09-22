@@ -153,6 +153,22 @@ go clean -cache          # 或用新的 GOCACHE 目录
 `docs/go-upgrade-guide.md` **§4.2**，每条都附设备上的实测证据。
 本 beta 的已知问题清单在 `docs/ohos-release-notes-v1.27.1-beta1.md`。
 
+## 上游跟进（这个移植怎么保鲜）
+
+**承诺**：跟随上游 **minor** 版本（`go1.27.x` 的安全修复）；**major**（`go1.28` 及以后）
+合并视验证情况，**不承诺时间窗**。
+
+措辞是刻意的：major 会动到本移植的承重处（TLS 重定位编号、musl emulation、平台表），
+合并必须重跑三层验证，给时间窗等于开空头支票。minor 只带修复，风险低，所以敢承诺。
+
+合并剧本在树里的 `docs/go-upgrade-guide.md` —— 要点是**先抽 delta 再合、合完拿残留
+diff 与新上游 tag 逐文件对账**；**§4.1 那张「必须保留」的表就是验收清单**。
+每代都要盯的三处：`asm7.go` 的 optab case 号（arm64 TLS_GD 用的号会被上游占走）、
+`R_AMD64_TLS_GD` 的枚举值、`MustLinkExternal` 的两处副本。
+
+**判断拿到的是哪棵树的工具链**：`go version` 带 `-ohos` 后缀。不带的就是上游的
+（或 beta1 的 tarball，它早于这处标记）。
+
 ## 从源码重建（可选）
 
 预编译树够用；要自己重建：
