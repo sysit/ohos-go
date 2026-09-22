@@ -68,7 +68,7 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 - 用 `git diff <上游tag> -- <file>` 检查最终结果：残留的 diff 应**恰好等于** OHOS delta 中该文件的部分
 - 某些 OHOS 改动在上游新版本已原生实现 → 应取 theirs（零 diff 才算正确）
 
-### 3.4 曾被子sumed 的 OHOS 改动（上游已原生实现，直接取 theirs）
+### 3.4 曾被 subsumed 的 OHOS 改动（上游已原生实现，直接取 theirs）
 
 - `doc/godebug.md` + `godebugs/table.go`（httpcookiemaxnum）
 - `crypto/x509/parser_test.go`、`verify_test.go`、`verify.go`（约束匹配移到泛型 constraints.go，取代 OHOS reversedDomainsCache 优化）
@@ -77,6 +77,44 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 - `runtime/runtime2.go`（allpSnapshot 上游已原生）
 - `net/url/url.go`、`url_test.go`
 - `runtime/crash_cgo_test.go` 的大部（1.26.5 重构为 race.Enabled 跳过）
+
+### 3.5 文件存在性校验（`git diff` **看不见**的一种缺失）
+
+`git diff <上游tag>` 只比**两边都跟踪的文件的内容**。它不会告诉你「上游跟踪了、本地根本没这个文件」——
+那种文件在 diff 里**什么都不显示**，除非你反过来按上游路径逐个 `[ -e ]`。
+
+而 .gitignore 正好能造出这种缺失：`.gitignore` 第 2、3 行是
+
+```
+*.[56789ao]
+*.a[56789o]
+```
+
+它匹配**上游真实签入的二进制 testdata**。这些文件在上游是 `git add -f` 进去的，一旦本地树里丢了，
+`git add -A` / `git add .` **永远加不回来**，`git status` 也不报缺 —— 静默。
+
+**实测代价**（2026-09-22，A 层全量跑出来的）：fork 导入时丢了 **10 个**上游跟踪的二进制 testdata，
+
+```
+src/cmd/objdump/testdata/go116.o                      → TestGoObjOtherVersion 挂
+src/go/internal/gccgoimporter/testdata/libimportsar.a → TestGoxImporter 挂
+src/go/internal/gcimporter/testdata/versions/test_go1.{7,8,11}_*.a  （8 个）
+```
+
+最后 8 个更阴：`go/internal/gcimporter` **不报 FAIL，只报 `ok`** —— 它靠文件缺席来跳过版本用例。
+补齐后同一包从 6.3s 变 27.7s，**才真的在跑**。「全绿」在这里同样会藏东西。
+
+**合并后必做这一步**：
+
+```bash
+gh api 'repos/golang/go/git/trees/<上游tag>?recursive=1' \
+  --jq '.tree[] | select(.type=="blob") | .path' | LC_ALL=C sort > /tmp/up.txt
+git -c core.quotePath=false ls-files | LC_ALL=C sort > /tmp/local.txt   # quotePath 会把非 ASCII 转义成八进制
+comm -23 /tmp/up.txt /tmp/local.txt        # 输出必须为空
+```
+
+`comm` 有输出 = 上游有而本地缺，**必须是 0 行**（本地多出来的行是 OHOS 新增文件，属正常 delta）。
+补文件时按上游 blob sha 校验（`git hash-object`），别信「看起来一样」。
 
 ---
 
@@ -94,6 +132,7 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | amd64 TLS 描述符 | `cmd/internal/obj/x86/asm6.go`（`ctxt.Tls=="GD" || (isOpenharmony && Flag_shared)`） |
 | arm64 TLS_GD | `cmd/internal/obj/arm64/asm7.go`（case 编号需避开上游已占用的号） |
 | openharmony 平台登记 | `internal/platform/zosarch.go`、`supported.go` |
+| **amd64 强制外链** | `internal/platform/supported.go` 的 `MustLinkExternal`（`case "openharmony": if goarch != "arm64"`）**及 `cmd/dist/build.go` 的引导期副本**。两处必须同时保留 —— `cmd/dist/build_test.go` 的 `TestMustLinkExternal` 逐格比对两者，漏一处就红。丢掉它，amd64 的**每次**默认构建都死在 `cannot handle R_AMD64_TLS_GD ... when linking internally`（见 §4.3） |
 | goos 映射 | `cmd/go/internal/cfg/cfg.go`、`cmd/go/go_test.go` 的 `goos`、cmd/dist |
 | c-shared 入口 | `runtime/rt0_openharmony_amd64.s`、`rt0_openharmony_arm64.s` |
 | 共享库 GC 数据 | `cmd/link/internal/ld/decodesym.go` 的 `decodetypeGcprogShlibByReloc` |
@@ -119,7 +158,7 @@ delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\ope
 | `-race` | ❌ 不可用（不开门） | TSAN 的 arm64 `InitializePlatformEarly` 硬要求 48 位 VMA（`cmp #48` / `b.ne` → `unsupported VMA range`），而设备用户地址空间只有 39 位：ASan 自报 `HighMem [0x002000000000, 0x007fffffffff]`，探针 `vma_bits_stack=38`。TSAN shadow 在 32 TiB（45 位）处，够不着。开了只会把构建期一句清楚报错换成运行期 sanitizer 崩溃 |
 | `-msan` | ❌ 不可行 | SDK 里 `libclang_rt.msan*` 为零，且 MSan 要求插桩过的 libc，OHOS musl 不是 → 每个 libc 调用都会假阳性。`MSanSupported` 的 `default: return false` 保持不动 |
 | SVE | ✅ 汇编器可用（需 `GOEXPERIMENT=simd`） | `ZADD Z7.D, Z23.D, Z13.D` 为 `openharmony/arm64` 编出 `04e702ed`，与上游 `arm64sveenc.s` 期望的 `ed02e704` 逐字节相符。硬件执行未验：shell uid 读不了 `/proc/cpuinfo` |
-| x509 系统根 | ❌ 外部进程取不到 | 探针报 `certpool: error: open /etc/ssl/certs: permission denied`——目录存在但 shell uid 无权限（`/etc/security`、`/system/etc/security` 同样 denied）。**正解是 `SSL_CERT_FILE`/`SSL_CERT_DIR`**（`root.go` 已尊重），故不加 `root_openharmony.go`，零 delta |
+| x509 系统根 | ✅ **应用域直接可用，不需要任何 env** | 本条原先记的是「❌ 外部进程取不到，正解是 `SSL_CERT_FILE`」—— **那是把 `sh` 域的载体限制当成了平台限制**，与下一行的环回是同一类错误（`sh` 域观测到的 `open /etc/ssl/certs: permission denied` 不能外推到应用域）。2026-09-22 用 `loopbackhap` 夹具在应用域（uid `20020077`）按 Go 的真实读取路径逐环验：`ReadDir("/etc/ssl/certs")` OK（1 条目 `cacert.pem`）→ 该条目 `lstat` **非软链**（否则会被 `readUniqueDirectoryEntries` 丢掉，成空池静默失败）→ `ReadFile` OK（191450 B，真 PEM）→ 同一份字节在宿主 `AppendCertsFromPEM` **125/125**。故 `root.go:199` 返回非空池。**不加 `root_openharmony.go` 这个结论是对的，但理由与当初写的相反：不是「取不到所以用 env」，是「上游 `certDirectories[0] = /etc/ssl/certs` 本来就命中 OHOS 的 bundle 目录」。** 唯一真缺口：`/data/certificates/user_cacerts`（OHOS 用户 CA）应用域 EACCES → **用户自装 CA 取不到**，照抄 Android 那两行无效（问题是权限不是路径），要做得走 OHOS cert framework + cgo，是**真特性不是补丁** |
 | 真机执行 | ⚠️ 受限 | 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（`Permission denied`）。本轮所有设备侧结论出自模拟器 |
 | **应用域环回 bind/listen/accept** | ✅ 可用 | **由 `sh` 域测不出来**。夹具 `misc/openharmony/loopbackhap`（无窗口 UIAbility，`@ohos.net.socket`）以 uid `20020077`（`u:r:app:s0`）跑：A `bind 127.0.0.1:0`、B `bind ::1:0`、C `bind 0.0.0.0:0`、D `listen 127.0.0.1:39321`、E 对自己 `connect` 并**收到入站连接**，五个全 OK。旁证：`com.9bt.transmissionbtm`（uid `20020076`）在同一个模拟器上 bind 了 `0.0.0.0:51413`。故 B 层 17 包环回类 FAIL 是 **`sh` 权限域限制，非 port 缺陷**（详见 `docs/ohos-full-test-plan.md` §5.1 / §5.3 的环回类） |
 | `-exec` 自动执行 | ✅ 可用 | `misc/go_openharmony_exec` 经 `go_<GOOS>_<GOARCH>_exec` 约定被 `go test` 自动发现：`GOOS=openharmony GOARCH=arm64 go test strings` → `ok strings 3.661s`。设备侧回程证据：`GOOS=linux GOARCH=arm64 IsOpenharmony=true`（**split identity 在运行中的设备进程里被观察到**），且故意失败的用例正确回传 `FAIL` + 非零退出码 |
@@ -131,6 +170,11 @@ B 层那 17 个包的环回类 FAIL 一度看起来像 port 缺陷（症状是 n
 `sh` 域（`uid=2000`/`u:r:sh:s0`）起不了监听，应用域（`uid=20020077`/`u:r:app:s0`）五个探针全过。
 **所以这类 FAIL 的成因是「跑测试的域」，不是移植代码。** 复现步骤、五个探针的含义、
 以及判读规则（A/D 失败才算真缺陷）都在 `misc/openharmony/loopbackhap/README.md`。
+
+**这条教训已经应验了两次**，别当成一次性的：同一个夹具后来又定案了 x509 ——
+`sh` 域报 `open /etc/ssl/certs: permission denied`，表格据此记了「x509 取不到系统根」，
+而应用域**读得到**（见上一行的 x509 条）。**凡是只在 `sh` 域观察到的路径/权限失败，
+都不能直接归给平台** —— 该夹具的 `CertProbe` 与环回探针在同一次 `aa start` 里跑完。
 
 两个操作要点：
 
@@ -177,6 +221,40 @@ cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
 （4 字节）经包装只回 `A`（1 字节）—— NUL 处截断，其后的字节一起丢。`test/nul1.go`
 （`// errorcheckoutput`，就是要造 NUL 源码）因此必挂。要修得改成「设备侧 stdout 重定向到文件
 再 `hdc file recv`」，动的是 `run()` 的核心路径，beta 阶段记成已知限制而不是冒险改。
+
+### 4.3 amd64 必须外部链接（2026-09-22 修，对应 §4.1 表里的同一行）
+
+`openharmony/amd64` 的**每次**构建都强制外部链接 —— `internal/platform/supported.go` 的
+`MustLinkExternal` 与 `cmd/dist/build.go` 的引导期副本各一行 `if goarch != "arm64" { return true }`。
+
+**为什么**：`cmd/internal/obj/x86/asm6.go` 的发射条件是
+`ctxt.Tls == "GD" || (isOpenharmony && ctxt.Flag_shared)`，而 openharmony 默认 PIE
+⇒ cmd/compile 拿到 `-shared`（实测：一轮默认构建里 465 次 compile 调用全带它）
+⇒ **每次默认构建都为 g 寄存器重载发出 `R_AMD64_TLS_GD`**。内部链接器没有这条重定位的实现
+（`ld/data.go:353` 直接 `log.Fatalf`），只有外部路径有（`amd64/asm.go` 的 `elfreloc1`，
+发 `R_X86_64_GOTPC32_TLSDESC` + `R_X86_64_TLSDESC_CALL`）。
+
+**代价**：amd64 的**纯 Go** 构建也要求 `CGO_ENABLED=1` + SDK clang，否则报
+`openharmony/amd64 requires external (cgo) linking, but cgo is not enabled`。
+与上游 `android/amd64` 的取舍逐字同形。**amd64 的 CC 要换 target**：
+
+```bash
+export CC="$OHOS_SDK/native/llvm/bin/clang --target=x86_64-linux-ohos \
+  --sysroot=$OHOS_SDK/native/sysroot -D__MUSL__"
+```
+
+**arm64 不受影响**：`asm7.go` 只在汇编显式 `MOVW $tlsvar`（case 101）时发 `R_ARM64_TLS_GD`，
+编译器产生的代码不走那条，默认构建里根本没有这条重定位，照旧内部链接。
+
+**为什么不在编译器侧收窄**：PIE 与 c-shared 拿到的都是 `-shared`，编译器分不出来。
+
+**实测**（2026-09-22）：改前 amd64 默认构建**必然** Fatalf；改后能编出产物 ——
+`ELF64 / DYN(PIE) / X86-64`、`PT_INTERP = /lib/ld-musl-x86_64.so.1`（架构正确的 musl 解释器）、
+`PT_TLS` 在位、动态重定位 **15922 `R_X86_64_RELATIVE` + 0 条 TLSDESC**、
+反汇编里 GD 惯用法（`call *(%rax)`）**0 次**、`%fs:` 段访问 **778 次**
+⇒ **lld 把 TLSDESC 松弛成了 LE**，与 arm64 PIE 已在模拟器上跑通的模型一致；
+而 arm64 的 **c-shared 库保留 1 条 `R_AARCH64_TLSDESC`**（被 dlopen 的库必须走描述符）。
+GD 出现在需要它的地方、LE 出现在安全的地方，**由链接器决定** —— 这正是外部链接不可替代的理由。
 
 ---
 
@@ -284,7 +362,7 @@ cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 刷新后的三连验收：
 
 ```bash
-~/go1.27.1-ohos/bin/go version                       # go version go1.27.1 darwin/arm64
+~/go1.27.1-ohos/bin/go version                       # go version go1.27.1-ohos darwin/arm64
 cd ~/go1.27.1-ohos/src && ../bin/go tool dist test -run=misc:execwrapper
 PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go test strings
 ```
@@ -296,8 +374,13 @@ PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go tes
 **打之前必须先验「发布构建标志」真的在树里。** `cmd/dist` 有个 release 闸门
 （`build.go:1399-1405`）：`isRelease || GO_BUILDER_NAME != ""` 时注入
 `GOFLAGS=-trimpath -ldflags=-w -gcflags=cmd/...=-dwarf=false`。`isRelease`（`build.go:279`）
-判的是 goversion 以 `release.` 或 `go` 开头且不含 `devel` —— 所以 `VERSION` 是 `go1.27.1`
-时它就成立，**但只在真正重新编译各工具时生效**。
+判的是 goversion 以 `release.` 或 `go` 开头且不含 `devel` —— 所以 `VERSION` 是 `go1.27.1-ohos`
+（fork 的版本串，`VERSION` 第 1 行，见 roadmap ③）时**照样成立**，**但只在真正重新编译各工具时生效**。
+
+> **版本串的后缀是有雷区的**：`-ohos` 安全，但换成含 `beta` 的会让 `cmd/api` 翻成开发版语义
+> （`cmd/api/main_test.go:110`），含 `devel` 会让 `isRelease` 变假、`findgoversion` 转去走 git tag 路径、
+> `-V=full` 开始附 buildID，写成 `+ohos` 或 `go1.27.1ohos` 则 `go/version` 直接判无效。
+> 逐条实测见 roadmap ③。
 
 > **踩过的坑：增量 `make.bash` 会把「没有 release 标志」的工具二进制原样留下。**
 > 症状是 `bin/go` 里嵌着绝对路径、`compile` 带 DWARF（36.2 MB vs 正常的 27.1 MB），

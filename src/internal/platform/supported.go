@@ -117,6 +117,16 @@ func MustLinkExternal(goos, goarch string, withCgo bool) bool {
 		if goarch != "arm64" {
 			return true
 		}
+	case "openharmony":
+		// Same shape as android above. openharmony reaches TLS through the
+		// general-dynamic model: cmd/compile is passed -shared in every
+		// (default) PIE build and emits R_AMD64_TLS_GD for the g register
+		// reload, but only the external linker implements that sequence --
+		// the internal one refuses it (ld/data.go). arm64 emits TLS_GD from
+		// hand-written assembly only, so it still links internally.
+		if goarch != "arm64" {
+			return true
+		}
 	case "ios":
 		if goarch == "arm64" {
 			return true

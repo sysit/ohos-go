@@ -108,6 +108,28 @@ GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 \
 
 所以：**选包用推导，排除用名单**，名单每条必须带原因（沿用 §4.2 的写法）。
 
+### 4.1 两个数的口径（`381` vs `262`）—— 别把 `go list std` 当成目标集
+
+对账过，**实际跑的 262 是全部有测试且能在 `openharmony/arm64` 下构建的包**，一个没漏：
+
+```bash
+go list std                                                            # 381
+go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 262
+```
+
+差的 **119 包 = 118 个磁盘上没有任何 `_test.go`** + **1 个（`runtime/race`）的 8 个测试文件全是 `//go:build race`**，
+`go list` 报 `TestGoFiles=[] Ignored=[…]`。后者落在排除集里是**对的** —— `-race` 正是 OHOS 做不了的那件事（§4.2）。
+
+- 118 里的常客：只有 `doc.go` 的（`unsafe`、`encoding`、`structs`）、纯嵌入数据的（`time/tzdata`）、
+  **整块 `vendor/`**（上游 vendoring 会剥掉 `_test.go`）、以及 `internal/` 下的一批小包。
+  拿不准就按目录实查 `ls <dir>/*_test.go`，别按包名猜。
+- **这个过滤挡掉的不只是 119 次空调用，更是 119 个假绿。** `go test` 打到无测试文件的包上会打印
+  `?  pkg  [no test files]` 并 **exit 0** —— 按退出码判的话它们会整片被算成 PASS，
+  把「没测」伪装成「测了通过」。§8 第 1 条「无『未执行』」要防的就是这个。
+
+引用计数时一律说「**262 个有测试的包**」，不要裸写「std 的 262 个包」——
+`std` 是 381，混用会让下一次对账的人以为丢了 119 个包。
+
 ---
 
 ## 5. 已知不可跑清单（v1，待实测增补）
@@ -119,10 +141,10 @@ GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 \
 | **依赖 cwd 的测试** | **已修**（阶段 0.4） | 原缺口：包装不设工作目录，设备上 `hdc shell` 的 cwd 就是 `/`（实测 `pwd` = `/`）。修前实例：`io/fs` 的 `TestGlob` 把根目录当测试目录，`os` 在 cwd 找 `os_test.go`/`stat_linux.go` → `could not find …`。修法：`pushSourceTree` 把包目录镜像到 `<work>/cwd/<宿主绝对路径>` 并 `cd` 进去 |
 | **依赖 `testdata/` 的测试** | **已修**（阶段 0.4） | 原缺口：包装不推送包的源文件树（修前实例：`text/template` 的 `TestParseFiles` → `open testdata/file1.tmpl: no such file`）。hdc 的 `file send` 递归拷目录，所以一次调用把源码和 `testdata/` 一起带过去 |
 | **需要 `$GOROOT` 落地的测试** | **阶段 2 实测已确认**，两个包 | 包装**不像** `go_android_exec` 那样把 GOROOT 拷到设备（它 527 行 vs 我们 264 行，少了 `adbCopyGoroot`/`adbCopyTree`/`pkgPath`）。实测命中 `time`（下详）。**注意这一类里有两种，可修性完全不同**，见下方「源文件可用性」 |
-| **任何依赖环境变量的测试** | **预期必挂** | **包装不下发 env**：`run()` 里 `cmd.Env` 未设，命令行只有二进制路径（`exec.Command(hdcPath, append(hdcArgs(target), "shell", cmdline+"; echo "+exitStr+"$?")...)`）。宿主 env 到不了设备进程。**这条推翻了本表原本对 `crypto/x509` 的处方** —— 「设 `SSL_CERT_FILE` 就好」是错的，宿主设了没用，得改包装 |
+| **任何依赖环境变量的测试** | **预期必挂** | **包装不下发 env**：`run()` 里 `cmd.Env` 未设，命令行只有二进制路径（`exec.Command(hdcPath, append(hdcArgs(target), "shell", cmdline+"; echo "+exitStr+"$?")...)`）。宿主 env 到不了设备进程。**这条推翻了本表原本对 `crypto/x509` 的处方** —— 「设 `SSL_CERT_FILE` 就好」是错的，宿主设了没用。**env 白名单后来已在 §5.6 补上**；而 x509 本身已于 2026-09-22 用 HAP 夹具在**应用域**定案：**根本不用设这个 env**，见 §5.3 的收口段 |
 | `-race` 变体 | 不开门 | 39 位 VMA vs TSAN 要求 48 位（§4.2） |
 | `-msan` 变体 | 不开门 | SDK 无 `libclang_rt.msan*`，且 MSan 要求插桩 libc（§4.2） |
-| `crypto/x509` 系统根 | 待定，需改包装 | 设备上 `/etc/ssl/certs` 对 shell uid 是 EACCES，且 env 不下发（见上） |
+| `crypto/x509` 系统根 | **已定性：`sh` 域假象，非 port 缺陷**（2026-09-22） | 设备上 `/etc/ssl/certs` 对 shell uid 是 EACCES；**应用域读得到**（HAP 夹具四环实测，`cacert.pem` 125 张全解），上游 `certDirectories[0]` 本来就命中。详见 §5.3 收口段 |
 | **环回 TCP listen 被禁** | **预期必挂，整类** | 模拟器 shell 域不许 `net.Listen("tcp4","127.0.0.1:0")` 也不许 tcp6。`nettest.probeStack`（`src/vendor/golang.org/x/net/nettest/nettest.go:37`）两个探针都失败 → 报 `tcp is not supported on linux/arm64`（措辞里的 `linux` 正是 split identity 的直接体现）。已见实例：`os` 的 `TestSendFile/sendfile-to-tcp/*`。**凡需要本地监听端口的包（`net`、`net/http`、`crypto/tls`）都会撞上**，这是除权限之外最大的一类环境噪音 |
 | 设备权限模型 | 按失败记录 | 模拟器 shell uid 受限。已见：`/etc` 读不了（`TestFileReaddir*`、`TestDoubleCloseError/dir`）、`lchown` 被拒（`TestLchown`）、`link()` 被拒（`TestLongPath`）、fifo `open` 被拒（`TestFifoEOF`）、`/dev/null` 与 `/dev/stdin` 的 `stat` 被拒（`TestDevNullFile`、`TestStatStdin`） |
 | `net` 系 DNS/网络 | 未知，先跑 | `probe` 采集了 DNS 事实，但未做过整包测试 |
@@ -206,7 +228,7 @@ TIMEOUT/WRAPPER 双零 = harness 侧没有噪音，**36 个 FAIL 全是真信号
 |---|---|---|---|
 | 环回 TCP/UDP 被禁 | 19 | `net`、`net/http`、`net/rpc`、`net/smtp`、`log/syslog`、`encoding/json`、`context`、`net/http/{cgi,httptest,httputil,cookiejar,pprof,internal/http2}`、`compress/gzip`、`crypto/tls` | `listen tcp4 127.0.0.1:0: bind: permission denied` —— **v4/v6 无差别**：`listen tcp4 127.0.0.1:0` 全轮出现 **96 次**、`net.log` 里 `bind: permission denied` **167 条**，所以这不是 v6 假象（§5.1 曾只引 `tcp6 [::1]` 一条，证据串偏弱，此处补强）。`crypto/tls` 与 `net/http/pprof` 是 `init()` 里就 listen，连一个测试都没跑到，日志只有 3 行 / 13 行 |
 | unix socket / SCM_RIGHTS | 4 | `syscall`(TestSCMCredentials/TestPassFD)、`os/exec`(TestExtraFilesRace) | `getsockopt: permission denied`、`failed to find unix fd` |
-| 设备权限模型 | 3 | `os`(19 个)、`crypto/x509`、`syscall` | `/etc/ssl/certs: permission denied`、`linkat …: permission denied`、fifo `open`、`TestDevNullFile`/`TestStatStdin` |
+| 设备权限模型 | 3 | `os`(19 个)、`crypto/x509`、`syscall` | `/etc/ssl/certs: permission denied`、`linkat …: permission denied`、fifo `open`、`TestDevNullFile`/`TestStatStdin`。**`crypto/x509` 那条已查清是 `sh` 域假象**（§5.3），本行剩下的才是真·设备权限 |
 | 设备上没有 `go` / 宿主源码树 | 8 | `go/build`、`go/types`、`go/parser`、`internal/copyright`、`math/big/internal/asmgen`、`path/filepath`、`runtime`、`crypto` | `lstat /Users/xiphis/projects/ohos-go/src/unicode: no such file or directory`、`'go build' unavailable: exec: "go": executable file not found in $PATH`、`../../arith_386.s`、`TestDisallowedAssemblyInstructions`（走 `go tool dist`）。原判「不可修」→ **§5.6 已修**（镜像整棵 GOROOT + 装设备原生 `go`） |
 | 镜像只覆盖包目录本身 | 3 + 若干 | `time`、`io/ioutil`、`compress/{flate,lzw,zlib}`、`internal/zstd`、`image/{draw,gif,jpeg}` | 路径是 `../testdata/`、`../../testdata/`、`../../lib/time/zoneinfo.zip`、`..`。**方向是「向上或向旁」**，`pushSourceTree` 只推包目录自身。与 §5.1 的 `time` 同一根因 → **§5.6 已修** |
 
@@ -217,6 +239,32 @@ TIMEOUT/WRAPPER 双零 = harness 侧没有噪音，**36 个 FAIL 全是真信号
 - 已做的排除：设备 `/proc/net/tcp{,6}` 当前 4 个 LISTEN **全部在 `10.0.2.15`**（模拟器 NAT 地址），没有一个是 `127.0.0.1`。这个探针**既没证实也没证伪**，只排除了「设备上另有进程在听环回」这个反例。
 - 要落地证实：让一个**应用进程**（HAP，或最小化地把 binder 塞进 HAP）去 bind 环回。那是换测试承载方式，不是改 `-exec` 包装。
 - 影响：这 19 包的 FAIL **不能**记成「平台做不到」，只能记成「我们这种启动方式做不到」。判据据此收紧 —— 它们仍是**未定性的**，不是已解释的。
+
+**✅ 已落地证实（2026-09-22 晚，`misc/openharmony/loopbackhap/`）。** 用 HAP 夹具在应用域
+（`uid=20020077` / `u:r:app:s0`）重跑同一组动作，**A–E 五个探针全 OK**，含 `D listen 127.0.0.1:39321`
+与 `E` 自连被 accept —— 不只是 bind 返回，listener 真收到了连接。⇒ **结论成立：是 `sh` 域限制。**
+旁证：同一模拟器上 `com.9bt.transmissionbtm`（uid `20020076`）能 bind `0.0.0.0:51413`。
+
+**同一个夹具顺带把 `crypto/x509` 那条也定了性 —— 而且推翻了原来的处方。**
+第 5 节表里记的是「`/etc/ssl/certs` 对 shell uid 是 EACCES，x509 不可测」，release notes 里
+甚至据此让下游设 `SSL_CERT_FILE`。应用域实测**读得到**：
+
+| Go 实际做的（`crypto/x509/root.go:183-197`） | 应用域 | 探针 |
+|---|---|---|
+| `os.ReadDir("/etc/ssl/certs")` | OK，1 条目 `cacert.pem` | B |
+| 该条目不是同目录软链（否则被 `readUniqueDirectoryEntries` 丢掉） | `lstat → symlink=false` | SC |
+| `os.ReadFile(.../cacert.pem)` | OK，191450 B，`-----BEGIN CERTIFICATE-----` | C |
+| `AppendCertsFromPEM`（同一份字节在宿主跑） | **125/125 解析成功** | — |
+
+`roots.len() > 0` ⇒ `root.go:199` 直接返回池子。上游 6 个 `certFiles` 在 OHOS 全 ENOENT（被忽略），
+但 `certDirectories[0] = "/etc/ssl/certs"` **正好命中 OHOS 的 bundle 目录**。
+**⇒ 零 delta 是对的，但理由跟当初写的相反：不是「取不到所以用 env」，是「上游默认路径本来就覆盖」。**
+
+`/etc` 本身也读得到（202 条目）—— `sh` 域则连列都列不了。同路径、两域、结论相反，
+与环回那次形状完全一样。**凡是只在 `sh` 域观察到的路径/权限失败，都不能直接归给平台。**
+
+唯一真实缺口：`/data/certificates/user_cacerts`（OHOS 的用户 CA 位置）应用域 `open` 得 EACCES
+（`lstat` 显示它存在且非软链）。**用户自装 CA 取不到**；上游给 Android 加的那两行照抄过来无效。
 
 `internal/copyright` 值得单记一笔：它 `filepath.WalkDir(GOROOT/src)`，walk 在设备上必然报错，而回调里**没判 `err` 就对 `d` 取 `d.IsDir()`** → nil 解引用 panic。这是上游测试的健壮性问题，但触发条件仍是「GOROOT 不在设备上」，归上一类（§5.6 修掉镜像后本包即 PASS）。
 
@@ -276,12 +324,50 @@ crypto/internal/fips140/check.init.0()  …/check/check.go:93
 
 | 缺陷 | 症状 | 修法 |
 |---|---|---|
-| **amd64 空洞**（静默错值） | `getRelocAddendMapShlib` 只处理 `EM_AARCH64`；`openharmony/amd64` 的 shlib 链接拿不到 map，**静默回落**到零 gcprog | 泛化为 `getRelocAddendMapShlibELF64(f, libpath, relative uint32)`，覆盖 `R_AARCH64_RELATIVE` / `R_X86_64_RELATIVE`（两侧 `asm.go` 都以 `symNo==0` 发射，lld 亦然）。**仅 arm64 实测**（无 amd64 设备），已留 `ponytail:` 注释 |
+| **amd64 空洞**（修复前：静默错值） | `getRelocAddendMapShlib` 原来只处理 `EM_AARCH64`；`openharmony/amd64` 的 shlib 链接拿不到 map，**静默回落**到零 gcprog | 泛化为 `getRelocAddendMapShlibELF64(f, libpath, relative uint32)`，覆盖 `R_AARCH64_RELATIVE` / `R_X86_64_RELATIVE`（两侧 `asm.go` 都以 `symNo==0` 发射，lld 亦然）。**两架构均已实测**（见下节补验）|
 | **静默降级** | miss 时 `log.Printf` + 返回 `false` → 回落到一个**已知为 0** 的值 | 改为：map 支持但字段为 0 且类型 `ptrdata != 0` → `Exitf`（带符号名/ptrdata）。机器不支持时仍安静回落 |
 
 这正是 §5.4 的形状：**链接期不报错 ≠ 对**。FIPS 已经证明这条路径上「成功」可以是假的。
 
 **验证**：注入探针重链（`-toolexec` 换 link）→ `PROBE-ENTER`/`PROBE-HIT` 各 4、`PROBE-LOOKUP-MISS` **0**、map 条目 76774 = 独立计数的 RELATIVE 条数；返回的 addend 指向的掩码字节内容正确（`[]string` 得 `01`、无指针类型得 `00`）。`./bin/go test cmd/link/...` 全绿；干净 `-linkshared` 链接不误报 `Exitf`。**注**：`-toolexec` 轮的产物与普通轮 **action ID 相同**（工具 ID 即 `link version go1.27.1`），普通轮是**缓存命中**而在复放探针输出 —— 判据必须用 `-a -x` 强制全量重链，那才是真 0。
+
+**amd64 侧补验（2026-09-22，纯宿主侧 —— 不需要 amd64 设备也能做）**：同法对
+`pkg/openharmony_amd64_dynlink/libstd.so`（75.8 MB）重跑注入探针，并补一份「形状对照」：
+
+| 判据 | arm64 `libstd.so` | amd64 `libstd.so` |
+|---|---|---|
+| `.rela.dyn` 段类型 | RELA，entsize `0x18` | RELA，entsize `0x18` |
+| RELATIVE 条目数 | 76774 `R_AARCH64_RELATIVE` | 76831 `R_X86_64_RELATIVE` |
+| `r_info` 高位（符号索引） | **0**（`0x403`） | **0**（`0x8`） |
+| addend | 非零 | 非零 |
+| 盘上字段（抽样 8/8） | **全为 0**，值只在 `.rela.dyn` | 同 |
+
+探针结果 —— **触发条件比想象中窄**：必须是「主二进制里有**数据段全局变量**、其类型**定义在 shlib 里**、
+且 kind 落在 `default` 分支（指针/切片/map/接口；struct 会递归分解，不用 mask）」，即
+`GCProg.AddType`（`data.go:1427`）。**函数内的局部变量不触发**；**未被引用的全局变量会被 deadcode 删掉、
+也不触发**（这两条各踩过一次，两轮空转才定位到）：
+
+| 架构 | `OHOSPROBE hit` | `miss` / `nosymvalue` / `nilsmap` |
+|---|---|---|
+| openharmony/amd64 | **5 / 5** | 0 / 0 / 0 |
+| openharmony/arm64 | **5 / 5** | 0 / 0 / 0 |
+
+（第二轮用**全新 `GOCACHE`** 复跑以排除「缓存复放」这条退路，命中数与 addend 逐字节一致；
+符号名跨架构相同、addend 因地址不同而不同，符合预期。）
+
+⇒ `lib.go:2939-2943` 那条 `ponytail:` 注释里的「amd64/asm.go emits the same r_info with a
+zero symbol index」**由推测变成实测**。加上两条代码事实，amd64 的「静默错值」路径可以关掉：
+
+- 返回 `ok=false` 的**静默**分支只有 `addendMap == nil`（`decodesym.go:244`），而它只对
+  **既非 arm64 也非 amd64** 的机器成立 —— `getRelocAddendMapShlib` 对 `EM_X86_64` 走
+  `R_X86_64_RELATIVE` 分支，落到架构中立的 `getRelocAddendMapShlibELF64`，返回 `make(map…)`，**非 nil**；
+- addendMap 非 nil 却没查到 addend 时，若 `ptrdata != 0 && gcprog == 0` 直接
+  **`Exitf`**（`decodesym.go:258-263`）。能安静走到 `decodesym.go:272` 回退的只剩 `ptrdata == 0`
+  —— 那时零 gcprog 本来就是正确答案。
+
+**仍未验的是运行期**：amd64 既无真机也无模拟器（`127.0.0.1:5555` 是 aarch64），
+所以宿主侧能验的到此为止。这条限制的准确措辞是**「构建期已验、运行期未验」**，
+不是「已知静默错值」。
 
 **上游面**：与 §5.4 同一句 —— **android 同样 lld + 外部链接**，同样的隐式假定，本轮未在 android 验证。
 
@@ -325,7 +411,7 @@ crypto/internal/fips140/check.init.0()  …/check/check.go:93
 
 **为什么不跟上游 android 那样直接 `export CGO_ENABLED=0` 把类 1 抹平**：那个变量是**构建配置**，不是环境旋钮。`src/go/build/build.go:360` 读的就是 `os.Getenv("CGO_ENABLED")`，导出去等于翻转**每个测试进程**的 `build.Default.CgoEnabled` —— 把「设备上编不了 C」这条真事实盖住，换来一个假的绿。宁可留 9 个 FAIL 并记成本类。
 
-**残留 23 个 FAIL 的构成**：环回类 17 包（含新到的 `internal/trace`）、unix socket/SCM_RIGHTS（`syscall`）、设备权限模型（`crypto/x509` 的 `/etc/ssl/certs`、`os`、`time` 的 `/usr/share`）、设备无 C 编译器（`runtime` 的 9 个）、上游 testdata 缺口（`go/internal/gccgoimporter`），外加 `runtime` 的 `TestTracebackSystem`（要 `-trimpath`，见 §5.2）。**除最后两项外，没有一条是 port 缺陷。**
+**残留 23 个 FAIL 的构成**：环回类 17 包（含新到的 `internal/trace`）、unix socket/SCM_RIGHTS（`syscall`）、设备权限模型（`os`、`time` 的 `/usr/share`，**`crypto/x509` 那条已移出** —— 2026-09-22 应用域复验证明是 `sh` 域假象，见 §5.3）、设备无 C 编译器（`runtime` 的 9 个）、上游 testdata 缺口（`go/internal/gccgoimporter`），外加 `runtime` 的 `TestTracebackSystem`（要 `-trimpath`，见 §5.2）。**除最后两项外，没有一条是 port 缺陷。**
 
 **本节最重要的结论不是那 13 个包，而是覆盖率的教训**：这一节之前 sweep 是 226 PASS、看起来「已知类都解释完了」，而 §5.4 那个静默的 FIPS 缺陷**从来没被 sweep 抓到过**（`crypto/internal/fips140only` 全量轮一直 PASS）。**全绿 ≠ 没缺陷** —— 链接期/运行期成对的机制、以及只在特定 GODEBUG 下才走的路径，必须在设备上单独实测。
 
@@ -412,6 +498,12 @@ cmd := []string{goTool, "tool", "link", "-s", "-w", "-buildid=test", "-o", outfi
 要么改 testdir 按目标平台传 PIE（动上游测试框架，还会把「非 PIE 内部链接不可用」这个事实盖掉）。
 记成已知空档，升级路径见 §5.7.3。
 
+**别把另一条同形状的洞混进来（2026-09-22 发现并修）**：arm64 这条说的是「**非 PIE** 的内部链接」，
+而 **amd64 的 PIE 默认构建**也曾**必然**失败 —— 它恒发 `R_AMD64_TLS_GD`，内部链接器同样没实现。
+两条的结论正好相反：arm64 这条**不修**（暴露面只有 testdir，真实用户撞不到），
+amd64 那条**必须修**（每次默认构建都撞，`MustLinkExternal` 已改成强制外部链接）。
+机制见 `docs/go-upgrade-guide.md` **§4.3**。
+
 #### 5.7.2 本轮顺带修掉的 2 个真缺陷
 
 **（1）三个 TLS objcheck 测试的检查从未运行过（port 自己写的测试）。**
@@ -487,7 +579,7 @@ C 层 ~1220 例设备执行，**2–5 小时**。
    **推论：C 层按原设计做，不降级。** ~1220 例设备执行是真实可跑的，不是「只验交叉编译」。
    **更正一条纪律**：本节原先写「剥 PATH 无法禁用包装，因为 `$GOROOT/bin` 会兜底」—— **错**。`pathcache.LookPath` 是裸 `exec.LookPath`，只查 PATH。当时那轮对照之所以还调到了包装，是因为 `$GOROOT/bin` 本来就在 PATH 上，剥掉的不是它；而本轮漏设 PATH 时立刻退化成 `exec format error`，正好反证。想禁用包装，剥 PATH 是有效的；`OHOS_TARGET` 指黑洞更安全，还能顺带验证假通过防线。
 2. ~~**包装能不能扛 `go test` 的并发？**~~ —— **已验，能**（2026-09-21）。默认 `-p` 跑 20 包，`flock` 把 hdc 访问串行化，**无报错、无死锁**。耗时分布呈现排队特征（多个包 elapsed 都聚在 ~21 s，是等锁不是自己跑），但结论是「默认 `-p` 可用，不必手工降到 1」。真正的吞吐数字要等阶段 2 带上 `runtime`/`net` 这类重包再测 —— 本轮全是小包，26 s 跑完 20 个，**不能外推**。
-3. ~~**`crypto/x509` + `SSL_CERT_FILE` 能不能过？**~~ —— **结论：这条路走不通，不是因为证书，是因为 env 根本下不到设备。** 包装的 `run()` 不设 `cmd.Env`，宿主设 `SSL_CERT_FILE` 对设备进程零影响。**处方作废**，已回写第 5 节。要验 x509 只能改包装（加白名单式 env 透传，android 版就是这么做的）—— **这一条仍未修**。
+3. ~~**`crypto/x509` + `SSL_CERT_FILE` 能不能过？**~~ —— **当时结论：这条路走不通，不是因为证书，是因为 env 根本下不到设备。** 包装的 `run()` 不设 `cmd.Env`，宿主设 `SSL_CERT_FILE` 对设备进程零影响。**处方作废**，已回写第 5 节。~~要验 x509 只能改包装（加白名单式 env 透传）~~ —— **env 白名单已在 §5.6 补上**；但 x509 的最终答案不在这条路上：2026-09-22 用 HAP 夹具在**应用域**直接读到 `/etc/ssl/certs`，`crypto/x509` 根本不需要任何 env。**本条闭环，两件事都已落地。**
 4. **~~包装的 cwd / testdata 缺口要不要修？~~** —— **已修，选的是「先补包装再跑全量」那条路**（§9 的 (a)）。2026-09-21 完成并实测：
 
    | 改动 | 内容 |
@@ -555,7 +647,7 @@ C 层 ~1220 例设备执行，**2–5 小时**。
 
 | 风险 | 说明 |
 |---|---|
-| ~~harness 缺陷淹没真信号~~（**已闭环**） | 原风险：包装缺「建工作目录 + 推源文件树 + 下发 env」，会让 cwd/testdata/env 三类测试成片 FAIL。三项**均已补掉并实测兑现**：cwd/testdata 见 §7 阶段 0.4，GOROOT 整树镜像 + 设备原生 `go` + env 白名单见 **§5.6（36 FAIL → 23 FAIL）**。**残留**：`SSL_CERT_FILE` 已能下发，但设备 `/etc/ssl/certs` 是 EACCES，`crypto/x509` 仍不可测（真·设备权限，非 harness 缺口）。「环回 TCP listen 被禁」「设备权限模型」**必须与 port 缺陷分开标注** |
+| ~~harness 缺陷淹没真信号~~（**已闭环**） | 原风险：包装缺「建工作目录 + 推源文件树 + 下发 env」，会让 cwd/testdata/env 三类测试成片 FAIL。三项**均已补掉并实测兑现**：cwd/testdata 见 §7 阶段 0.4，GOROOT 整树镜像 + 设备原生 `go` + env 白名单见 **§5.6（36 FAIL → 23 FAIL）**。**残留（2026-09-22 已全部收口）**：`SSL_CERT_FILE` 已能下发；而 `crypto/x509` 与「环回 TCP listen 被禁」两类**都已在应用域用 HAP 夹具证伪** —— 前者应用域读得到系统根（无需 env），后者应用域 bind/listen/accept 全通。**两者原先记的「设备权限」都是 `sh` 域的载体限制，不是平台限制。** 见 §5.3 收口段与 release notes 已知问题 2。 |
 | **旧工具链污染测量**（已中过一次） | `~/go1.27.1-ohos` 早于 `2417e0834a9`，本轮第一遍测量全部作废重跑。**跑之前先核对工具链出处**（`git show HEAD:src/internal/platform/supported.go | grep -A2 'func DefaultPIE'` 应含 `openharmony`），别信目录名里的版本号。 |
 | **下游拿到过期工具链** | `~/go1.27.1-ohos` 就是 v2rayHM 的 `OHOS_GO_ROOT`，它缺 PIE 修复与 FIPS 修复（构建于 09-19 16:52，两个提交分别在 21:24 / 更晚）。**2026-09-22 做了 A/B 实测来界定波及面**（同一个 `cgomin`/`cshared` 夹具，只换工具链，都在模拟器上跑）：<br>• **c-shared `.so`（v2rayHM 实际产出的形态）：过期树产物 `Add(40,2)=42` / exit 0 —— 不受影响。** c-shared 走外部链接（clang 按 `--target` 自选 loader）且 `Flag_shared` → TLS 走 GD；`.so` 本身也没有 `PT_INTERP`（实测两者都是 0 段）。<br>• **cgo 可执行文件：过期树产物 `Signal 11` / exit 139，仓库树 `main reached` / exit 0 —— 确实坏。**<br>所以**别笼统说「下游会 Signal 11」** —— 受影响的是**可执行文件**（`go test` 二进制也是这一类），而 v2rayHM 编的是 `.so`。仍建议刷新那棵树（配方见 `docs/go-upgrade-guide.md` §6.7），但**不是**「一放出去就有人踩」的阻断项。 |
 | 假通过 | 已发生过一次（`480afb8fc47`）。任何「结果解析」路径都要有回归测试，新脚本复用 `newExitFilter` 而不是自己拼 |

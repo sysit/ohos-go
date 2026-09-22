@@ -666,6 +666,11 @@ func mustLinkExternal(goos, goarch string, cgoEnabled bool) bool {
 		if goarch != "arm64" {
 			return true
 		}
+	case "openharmony":
+		// See internal/platform.MustLinkExternal for why amd64 needs this.
+		if goarch != "arm64" {
+			return true
+		}
 	case "ios":
 		if goarch == "arm64" {
 			return true
