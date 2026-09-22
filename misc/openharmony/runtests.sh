@@ -86,7 +86,7 @@ export CC="$OHOS_SDK/native/llvm/bin/clang --target=aarch64-linux-ohos --sysroot
 export PATH="$REPO/bin:$PATH"
 export OHOS_TARGET
 
-# 设备先探活。不探的话设备挂掉时整轮 262 个包全变 WRAPPER —— 分类是对的，但白刷一
+# 设备先探活。不探的话设备挂掉时整轮 262 个有测试的包全变 WRAPPER —— 分类是对的，但白刷一
 # 轮、还把 results.tsv 灌满噪音（2026-09-21 真发生过：模拟器空转 474% CPU 不自愈）。
 HDC=${HDC:-hdc}
 if ! "$HDC" -t "$OHOS_TARGET" shell 'echo ok' 2>&1 | grep -q ok; then

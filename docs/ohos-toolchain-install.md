@@ -6,8 +6,9 @@
 **go1.27.1**（`VERSION` 文件是权威）。发布形态是**预编译树 + tag**，所以你不需要
 `./make.bash`（那要 3 阶段自举，还要一个 go1.24.6+ 的 bootstrap）。
 
-本 beta 只发布 **darwin/arm64 宿主** —— 唯一实测过的宿主。支持的目标只有
-`openharmony/amd64` 与 `openharmony/arm64`。
+本 beta 只发布 **darwin/arm64 宿主**（唯一实测过的宿主）。**下一个 cut 会同时出
+`linux/amd64` 宿主**（宿主可行性已实测，见 `docs/ohos-release-roadmap.md` ④）。
+支持的目标只有 `openharmony/arm64` 与 `openharmony/amd64` —— 与宿主架构无关。
 
 > **版本串**：分支上 `VERSION` 已从 `go1.27.1` 改成 **`go1.27.1-ohos`**，好让 `go version`
 > 的输出能区分 fork 与上游（动机与雷区见 `docs/ohos-release-roadmap.md` ③）。

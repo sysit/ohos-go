@@ -73,6 +73,20 @@ jobs:
             ;;
           esac
 
+      # go.env 就是 GOROOT 根的那个文件（bin/go 按自身位置推 GOROOT），所以这里查的
+      # 就是发出去的值。上游写的是 GOTOOLCHAIN=auto，留着的话用户依赖一旦要求更高
+      # 版本，go 会去下官方工具链，而官方工具链编不出 GOOS=openharmony。
+      #
+      # 为什么非查文件不可：本 workflow 顶上的 env 已经把 GOTOOLCHAIN 钉成 local，
+      # **运行期看不出差别 —— 这条 delta 丢了 CI 也不会红**，除非直接查文件。
+      - name: go.env 的 GOTOOLCHAIN 必须是 local
+        run: |
+          set -eu
+          grep -qx 'GOTOOLCHAIN=local' go.env || {
+            echo "::error::go.env 里的 GOTOOLCHAIN 不是 local：$(grep '^GOTOOLCHAIN' go.env || echo 缺失)"
+            exit 1
+          }
+
       # cmd/dist 那份 TestMustLinkExternal 逐格比对 MustLinkExternal 的两处副本
       # （internal/platform/supported.go 与 cmd/dist/build.go）。漏一处就红 —— 这是
       # amd64 强制外链那条 delta 唯一的自动防线。

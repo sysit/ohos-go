@@ -10,7 +10,7 @@
 
 ## 问题一：应用域能不能 bind 127.0.0.1？
 
-B 层全量（262 个 std 包交叉编译 + 设备执行）里有 **17 个包**（`net`、`net/http`、
+B 层全量（262 个有测试的 std 包交叉编译 + 设备执行）里有 **17 个包**（`net`、`net/http`、
 `internal/trace`、`os/exec` 一族……）的 FAIL 都指向同一个症状：用例要在 `127.0.0.1`
 上起监听，拿不到端口。设备侧报出来的是 nettest 掩盖过的
 `tcp is not supported on linux/arm64`，看不出真正的 errno。

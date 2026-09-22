@@ -11,12 +11,12 @@
 
 ## 执行顺序
 
-~~① x509 应用域复验~~ ✅ → ~~② A 层重跑~~ ✅（顺带修掉 10 个丢失的 testdata）→ ~~③ 版本串~~ ✅ → ~~④ linux/amd64 宿主~~ ✅（**挖出一个真缺陷，已修**）→ ~~⑤ amd64 目标定性~~ ✅（原论断被推翻；补了一条真缺陷，见下）→ ⑥ CI → ⑦ 跟进承诺
+~~① x509 应用域复验~~ ✅ → ~~② A 层重跑~~ ✅（顺带修掉 10 个丢失的 testdata）→ ~~③ 版本串~~ ✅ → ~~④ linux/amd64 宿主~~ ✅（**挖出一个真缺陷，已修**）→ ~~⑤ amd64 目标定性~~ ✅（原论断被推翻；补了一条真缺陷）→ ~~⑥ CI~~ ✅ → ~~⑦ 跟进承诺~~ ✅ → ~~⑧ 产物对账~~ ✅（又挖出一条 delta，见下）→ **⑨ 下次 cut 的待办**
 
-①②③④⑤ 已闭环。前四条**一条 port 源码都不用改**（② 的两条真缺陷是**丢失的 testdata**）；
+**①~⑧ 已闭环。** 前四条**一条 port 源码都不用改**（② 的两条真缺陷是**丢失的 testdata**）；
 **④ 挖出的那条要改代码，是本轮唯一一处 port 源码改动**：`openharmony/amd64` 的
 **默认构建此前 100% 编不出来**，已照上游 `android/amd64` 的先例修掉（详见 ④ 与 ⑤ 补）。
-**下一个是 ⑥ CI。**
+**⑧ 是收尾后拿产物对账才发现的** —— 同一类盲区第二次咬人，见那节的教训。
 
 ---
 
@@ -325,7 +325,7 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 
 **B / C 两层的设备证据失效了吗**：没有，**不需要重跑设备侧**。理由是这次改动的返回值为
 `goarch != "arm64"`，**在 arm64 上恒为旧值** —— 代码路径逐字未变（上面 7 条 arm64 回归用例
-也逐条实测过）。B 层 262 包与 C 层 2739 例跑的正是 arm64 目标，结论继续有效。
+也逐条实测过）。B 层 262 个有测试的包与 C 层 2739 例跑的正是 arm64 目标，结论继续有效。
 **A 层（宿主）已用最终树重跑**，见下。
 
 ---
@@ -391,10 +391,55 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 发新版」原来是空的。beta 可以是一次性快照；release 意味着有人跟着 go1.28、go1.29
 走，否则半年后它是一棵没人敢升的死树。
 
-**尚未解决的一半：触发。** 现在仍靠「用户看到上游发版时喊一声」。
-备选是加一条定时 workflow（`git ls-remote` 比 tag，发现新的就开 issue）—— 那样
-「谁记得」不依赖任何人。**暂未做**：开 issue 是对外的副作用，等用户点头再说
-（也正因为如此，没有用会话内定时器 —— 它 7 天就过期，对「每月看一眼」是错的工具）。
+**触发那一半也定了（2026-09-23，用户拍板）：新版本由用户触发。**
+
+原备选是加一条定时 workflow（`git ls-remote` 比 tag，发现新的就开 issue），**不做** ——
+开 issue 是对外的副作用，而用户本来就会看到上游发版。所以这里不引入任何自动轮询：
+**上游 tag 出现 → 用户喊一声 → 按上面的流程合并。** 代价是「没人喊就没人合」，
+但这是用户明确选的，不是遗漏。
+
+---
+
+## ⑧ `go.env` 的 `GOTOOLCHAIN` 曾丢掉 ✅ 已修（2026-09-23，收尾后对账才发现）
+
+拿仓库树与已装树 `~/go1.27.1-ohos` 逐文件对账，根 `go.env` 两边不一致：
+
+- **仓库**（= 下次打包的源）：`GOTOOLCHAIN=auto` —— **上游的原值，OHOS 那行不在**
+- **已装树**（= 已发出去的 beta1）：`GOTOOLCHAIN=local` + 一段解释注释
+
+`git log -- go.env` 显示本分支只有一个提交动过它（`4cc31134303`，7 月），而且是**原样搬上游**。
+也就是说 **这条 delta 从来没进过仓库** —— 已装树里的 `local` 是某次手工改的，**不可从仓库复现**。
+
+机制，实测（`/tmp/tcprobe`，一个 `go 1.28` 的模块）：
+
+```
+GOTOOLCHAIN=local → go: go.mod requires go >= 1.28 (running go 1.27.1; GOTOOLCHAIN=local)
+GOTOOLCHAIN=auto  → go: downloading go1.28.0 (darwin/arm64)
+```
+
+`auto` 就是**把本移植换成官方工具链**，而官方工具链编不出 `GOOS=openharmony` ——
+正是 `docs/ohos-toolchain-install.md` 硬前提 §3 警告的那件事。
+
+**为什么 CI 没抓到**：workflow 顶上的 `env: GOTOOLCHAIN: local` 把运行期钉死了，
+所以这条 delta 丢了 CI 照样绿。已补一条**直接查文件**的断言
+（`grep -qx 'GOTOOLCHAIN=local' go.env`），并加进 `go-upgrade-guide.md` §4.1 那张表。
+
+**普适教训**：这条 delta 的症状**只出现在下游**（用户的模块里），本仓库怎么跑都看不见 ——
+与「上游有、本地缺的文件 `git diff` 看不见」是同一类盲区。**对账要看产物，不能只看自家测试绿不绿。**
+
+---
+
+## ⑨ 下一次 cut 的待办（2026-09-23 定）
+
+1. **同时出 linux/amd64 tarball**（用户拍板）。宿主可行性已在 ④ 验过，打包配方见
+   `docs/go-upgrade-guide.md` §6.8。
+2. **先刷新 `~/go1.27.1-ohos`**，它与仓库的差只剩三处：⑤ 的 amd64 外链 delta、
+   `VERSION` 的 `-ohos` 标记、以及 10 个上游签入的二进制 testdata
+   （`src/cmd/objdump/testdata/go116.o`、`src/go/internal/{gccgoimporter,gcimporter}/testdata/*.a`）。
+   **arm64 不受影响** —— 实测用它编 cgo 可执行文件拿到正确的 `Type: DYN` + musl 解释器，
+   所以这不是「已发布的 beta1 坏了」。但这些差异**不该进下一个 tarball**。
+3. **打包源必须是从仓库 `make.bash` 出来的树**，不是已装树 —— 否则 ⑧ 那类
+   「只在产物里对、仓库里没有」的手工改动会继续以不可复现的方式往下传。
 
 ---
 

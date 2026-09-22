@@ -140,6 +140,7 @@ comm -23 /tmp/up.txt /tmp/local.txt        # 输出必须为空
 | 链接器跳过 | `cmd/link/link_test.go`（race detector skip `|| runtime.IsOpenharmony`） |
 | 默认 PIE | `internal/platform/supported.go` 的 `DefaultPIE`（`case "android", "ios", "openharmony"`）——去掉它，cgo 可执行文件就会退回 `Signal 11` |
 | ELF 解释器 | `cmd/link/internal/ld/elf.go` 的 `case objabi.Hlinux`（openharmony → 直接用 `LinuxdynldMusl`，**不做宿主探测**） |
+| **`go.env` 的 `GOTOOLCHAIN=local`** | 仓库根的 `go.env`。**这个文件就是 GOROOT 根的文件**（`bin/go` 按自身位置推 GOROOT），所以它逐字就是发布出去的值。上游写的是 `GOTOOLCHAIN=auto` —— 留着它，用户模块里只要有一个依赖声明了更高版本，`go` 就会**去下载官方工具链**（实测会打 `go: downloading go1.28.0`），而官方工具链编不出 `GOOS=openharmony`。合并时这行会被上游盖掉，而且**症状只出现在下游、不在本仓库**，所以必须靠对账 |
 | CI | `.github/workflows/ohos.yml` —— 上游 `golang/go` 没有 workflows，合并不会冲突，**但它守的是这张表本身**（amd64 外链、DefaultPIE、平台登记都被它断言）。丢了它，这张表就退回「只有散文记录」 |
 
 ### 4.2 能力实测结论（2026-09，go1.27.1）

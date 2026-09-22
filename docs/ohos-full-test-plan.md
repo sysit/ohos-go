@@ -12,7 +12,7 @@
 - **真机跑不了。** 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（§4.2）。设备侧结论**只能**来自模拟器 `127.0.0.1:5555`。
   （已核对：模拟器 `uname -m` = `aarch64`，与 `GOARCH=arm64` 一致；`/data/local/tmp` 可读写。**真机不在线对本方案零影响** —— 唯一能 exec 的设备就是这台模拟器，别为凑真机花时间。）
 - **`-race` 开门即崩。** TSAN 硬要求 48 位 VMA，设备只有 39 位。所有 `-race` 变体不是在"验证功能"，是在验证一个已知不行的事实。
-- **单设备串行是硬约束。** `go_openharmony_exec` 用 `flock` 把所有 hdc 访问串行化（`lock()`，因为 hdc 本身不安全并发），而 `go test` 默认并行跑包。所以 262 个包实际是**顺序** push + run，吞吐上不去。多设备并行也不成立——只有一台能 exec。
+- **单设备串行是硬约束。** `go_openharmony_exec` 用 `flock` 把所有 hdc 访问串行化（`lock()`，因为 hdc 本身不安全并发），而 `go test` 默认并行跑包。所以 262 个有测试的包实际是**顺序** push + run，吞吐上不去。多设备并行也不成立——只有一台能 exec。
 - **因此全量一轮是小时级，不是分钟级。** 估算见第 6 节。方案必须设计成**可中断、可续跑、可分批**，不能指望一把梭跑完。
 
 ---
@@ -27,7 +27,7 @@
 | `test/` 驱动器 | `src/cmd/internal/testdir` | `-target goos/goarch` 交叉编译；`findExecCmd` 已按同一约定自动找包装 |
 | 能力夹具 | `misc/openharmony/`（9 个目录） | 每种 buildmode 一个夹具 + `probe` 事实采集器 + `ohosrun` 推送壳 |
 | 推送壳 | `misc/openharmony/ohosrun` | 不经 `go test` 时手工推送执行 |
-| **阶段 2/3 驱动器** | `misc/openharmony/runtests.sh` | 上面三个硬前提（`bin/go`、SDK clang 绝对路径、`$GOROOT/bin` 上 PATH）脚本自己设好，照抄必踩的三条不用记。一个包一次 `go test`，配主机侧看门狗 + 每包独立日志，结论追加 `results.tsv`，重跑自动跳过已 PASS。`--all` = B 层 262 包；`--list` 只看清单 |
+| **阶段 2/3 驱动器** | `misc/openharmony/runtests.sh` | 上面三个硬前提（`bin/go`、SDK clang 绝对路径、`$GOROOT/bin` 上 PATH）脚本自己设好，照抄必踩的三条不用记。一个包一次 `go test`，配主机侧看门狗 + 每包独立日志，结论追加 `results.tsv`，重跑自动跳过已 PASS。`--all` = B 层 262 个有测试的包；`--list` 只看清单 |
 
 **几个必须知道的机制细节：**
 
@@ -68,7 +68,7 @@
 `runtime` + `stdlib` 在真机（模拟器）上的行为。这才是「1.27.1 在 OHOS 上能不能用」的答案。
 
 - 载体：`GOOS=openharmony GOARCH=arm64 go test -exec=... std`（包装靠约定自动发现，不必显式写 `-exec`）
-- 规模（实测，`CGO_ENABLED=1`）：`go list std` = **381 包**，其中有测试的 **262 包**
+- 规模（实测，`CGO_ENABLED=1`）：`go list std` = **381 包**，其中有测试的 **262 个有测试的包**
 - **cgo 开关会改变包集合，量数必须锁定一种配置。** 本方案一律用 `CGO_ENABLED=1`（cgo 才是这个 port 的主战场，musl TLS 整条链路都在里面）。作为对照：`CGO_ENABLED=0` 时 std 少两个包 —— `runtime/cgo` 与 `internal/runtime/cgobench` —— 总数 379，有测试的 260。**任何写「379」或「260」的旧记录都是 cgo 关的数，别用。**
 
 ### C 层 —— `test/` 目录（编译器正确性，2734 例）
@@ -127,7 +127,7 @@ go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 
   `?  pkg  [no test files]` 并 **exit 0** —— 按退出码判的话它们会整片被算成 PASS，
   把「没测」伪装成「测了通过」。§8 第 1 条「无『未执行』」要防的就是这个。
 
-引用计数时一律说「**262 个有测试的包**」，不要裸写「std 的 262 个包」——
+引用计数时一律说「**262 个有测试的包**」，不要裸写「std 的 262 个有测试的包」——
 `std` 是 381，混用会让下一次对账的人以为丢了 119 个包。
 
 ---
@@ -205,7 +205,7 @@ Kernel panic - not syncing: System is deadlocked on memory
 
 **附：`WRAPPER` 这一态在真实故障里兑现了一次。** 同日启动全量轮，设备在中途掉线，**已跑的 112 个包全部被标成 `WRAPPER`，没有一个被算成 PASS**（日志是 `hdc` 的 `[Fail][E001005] Device not found or connected`）。这正是 §8 那条「不允许『设备没回传状态』被算成 PASS」要防的情形 —— 它在 `480afb8fc47` 里是个真 bug，现在被拦住了。**如果当时是按退出码判**，`go test` 会把包装的 125 压成 1，这 112 个包会整片落进 `FAIL`，混进上面那五类环境限制里 —— **信号就淹了**。这也是为什么 `WRAPPER` 必须靠日志前缀认，不能靠退出码。
 
-### 5.3 阶段 3 全量实测结果（2026-09-21，`--all`，262 个包）
+### 5.3 阶段 3 全量实测结果（2026-09-21，`--all`，262 个有测试的包）
 
 > **这一节是修复前的基线（v1，包装还没做 GOROOT 镜像）。** 后续修复的效果、以及本节的哪几行已被消掉，见 **§5.6**。
 
@@ -387,7 +387,7 @@ zero symbol index」**由推测变成实测**。加上两条代码事实，amd64
 - **`test/` 和 `VERSION` 是必须的，不是顺手带的**：`go/types` 会 type-check `GOROOT/test/ken`；`cmd/dist`（经 `go tool dist list` 被 `crypto` 和 `internal/platform` 触达）的 `findgoversion()`（`cmd/dist/build.go:373`）**先读 `$GOROOT/VERSION`**，读不到才回落 `git log` —— 而设备上没有 `git`。
 - **env 走白名单透传**（`GODEBUG`/`GOGC`/`GOMEMLIMIT`/`GOMAXPROCS`/`GOTRACEBACK`/`SSL_CERT_FILE`），**故意不含 `CGO_ENABLED`**：见下面的新增类 1。上游 android 包装是直接 `export CGO_ENABLED=0` 的，这里没有跟。
 
-**前后对比**（同一台模拟器，`--all`，262 包）：
+**前后对比**（同一台模拟器，`--all`，262 个有测试的包）：
 
 | | v1（无镜像） | v3（有镜像） |
 |---|---|---|
@@ -610,7 +610,7 @@ C 层 ~1220 例设备执行，**2–5 小时**。
 
 ### 阶段 3 —— 全量（小时级，发版/升级后跑一次）
 
-`runtests.sh --all`（B 层 262 包）+ C 层全量（`-shards=4`，见 §5.7）。**2026-09-21/22 已各跑一轮**：
+`runtests.sh --all`（B 层 262 个有测试的包）+ C 层全量（`-shards=4`，见 §5.7）。**2026-09-21/22 已各跑一轮**：
 
 | 轮 | 层 | 结果 | triage |
 |---|---|---|---|
