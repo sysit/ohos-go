@@ -40,7 +40,13 @@ jobs:
         # macos-14 = darwin/arm64（发布 tarball 的那个宿主）。
         # 加宿主不是为了覆盖率好看 —— delta 里有宿主相关的分支（cmd/dist 的自举、
         # misc 包装、AR 的形态），单宿主看不出来。
-        os: [ubuntu-latest, macos-14]
+        #
+        # 两个都**写死版本**，不用 -latest：ubuntu-latest 从 2026-10-19 起迁到
+        # Ubuntu 26，而 A 层基线（377 ok / 0 FAIL）是在 24.04 上量的 —— 漂了之后
+        # 红的是基线不是代码，且没有任何东西提醒你宿主换了。写死版本让这次切换
+        # 变成一次**显式的**升级动作（改这一行 + 重量基线）。macos-14 本来就是
+        # 写死的，两格对称。
+        os: [ubuntu-24.04, macos-14]
     steps:
       - uses: actions/checkout@v7
 
@@ -50,6 +56,17 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: false
+
+      # 基线的可溯源性：把宿主的实际身份打进日志。**写死版本号 ≠ 镜像不变** ——
+      # 固定标签的 runner 镜像本身也按月更新（编译器、内核、预装工具）。这一步是
+      # 唯一能事后回答「当时是哪台机器」的东西，代价半秒。
+      # 必须在 setup-go **之后**：`go version` 打的得是真正当 bootstrap 的那个。
+      - name: 宿主身份
+        run: |
+          (cat /etc/os-release 2>/dev/null || sw_vers) | head -4
+          uname -a
+          (cc --version 2>&1 || true) | head -1
+          go version
 
       # 不要给 GOCACHE 加 actions/cache。陈旧缓存会让 reloc 枚举编号漂移，链接期报
       # `unknown reloc to ...: 105 (RelocType(105))` —— 本项目反复踩过的坑。每次
@@ -165,10 +182,17 @@ jobs:
       #
       # 两条只有在这一步才可能红的缺陷：
       #   1. release 构建标志没生效（`cmd/dist` 的 isRelease 闸门，见 guide §6.8）。
-      #      症状是 bin/go 里嵌着构建树的绝对路径，而 make.bash 退出码是 0 ——
+      #      症状是 bin/ 里嵌着构建树的绝对路径，而 make.bash 退出码是 0 ——
       #      跑 `go version` 完全看不出来。
       #   2. 包里的树**自己编不出东西**（例如 pkg/tool 没打进去）。所以这里一定
       #      要从**解出来的那棵树**编一次，而不是复用上面已经编好的工作区。
+      #
+      # `bin/` 是**逐个文件**查的，不是只查 bin/go（2026-09-23 改）：那天实测两棵树
+      # bin/go 逐字节相同，而 bin/go_openharmony_arm64_exec 一棵带构建机绝对路径、
+      # 一棵不带 —— 只查 bin/go 的版本把缺陷放过去了，一路发进 beta2 的 tar 包
+      # （已知问题 7c）。**但这仍守不住包装**：普通 make.bash 的 goos == gohostos，
+      # `wrapperPathFor` 返回空，CI 这棵树里根本没有 _exec 包装，所以这里查不到它。
+      # 包装的防线在 guide §6.7（手装时带 -trimpath + 打 tarball 前手工查整棵 bin/）。
       #
       # 不验成员名（`--transform`）：`bin/go` 按自身位置推 GOROOT，目录叫什么都不影响。
       # 顺带避开 BSD tar 没有 `--transform` 这件事（macos-14 那一格）。
@@ -197,10 +221,35 @@ jobs:
             ;;
           esac
 
-          if strings "$E/bin/go" | grep -qF "$GITHUB_WORKSPACE"; then
-            echo "::error::包里的 bin/go 带着构建树的绝对路径 —— release 构建标志没生效（guide §6.8）"
-            exit 1
-          fi
+          # 查**整棵** bin/，不是只查 bin/go。2026-09-23 实测：两棵树 bin/go 的 sha256 相同
+          # （9cfddd97...，release 标志都生效了），而 bin/go_openharmony_arm64_exec 一棵带
+          # 构建机绝对路径、一棵不带 —— 只查 bin/go 的版本把这棵树放过去了，缺陷一路发到了
+          # beta2 的 tar 包里（事后在发布的那份 darwin 资产上核实过：两个包装各 366 处
+          # /Users/xiphis/go1.27.1-ohos/...，而 bin/go 是 0 处）。dirty=1 是让循环报出全部
+          # 命中项再失败，别第一个就退。
+          #
+          # 两条判据是故意都留的：`$GITHUB_WORKSPACE` 那条对**本树**更宽（任何形态的路径都抓），
+          # 但只在「CI 打的就是它自己在 $GITHUB_WORKSPACE 里编的树」时成立 —— 哪天打包改成
+          # 打一棵别处编的树，它会**静默失效**。`^/...\.go$` 那条与路径无关，兜住那种情况。
+          # 别把 `-F "$PWD"` 那类写法当判据：解包到别的路径后它恒为 0（guide §6.7 有取证）。
+          dirty=0
+          for f in "$E"/bin/*; do
+            [ -f "$f" ] || continue
+            b="${f#"$E"/}"
+            # `-n` 的守卫不是形式主义：变量空时 `grep -qF ""` **匹配任何文件**，
+            # 于是这个 job 假红、而且红得毫无线索。这类「检查本身会说谎」正是本节的主题。
+            if [ -n "$GITHUB_WORKSPACE" ] && strings "$f" | grep -qF "$GITHUB_WORKSPACE"; then
+              echo "::error::包里的 $b 带着构建树的绝对路径 —— release 构建标志没生效（guide §6.8）"
+              dirty=1
+            fi
+            n=$(strings "$f" | grep -cE '^/[^ ]*\.go$' || true)
+            if [ "$n" != 0 ]; then
+              echo "::error::包里的 $b 有 $n 条绝对路径形态的 .go 串 —— 同样说明 release 标志没生效"
+              dirty=1
+            fi
+          done
+          [ "$dirty" = 0 ] || exit 1
+          echo "bin/ 下没有构建树路径（bin/go 与手工装的 _exec 包装都在内）"
 
           mkdir -p "$E/work" && cd "$E/work"
           printf 'package main\nfunc main(){}\n' > main.go

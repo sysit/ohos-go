@@ -11,7 +11,7 @@
 
 - **真机跑不了。** 商用版真机 `4VM0125513000074` 的 shell 域不能 exec `/data/local/tmp` 下的未签名二进制（§4.2）。设备侧结论**只能**来自模拟器 `127.0.0.1:5555`。
   （已核对：模拟器 `uname -m` = `aarch64`，与 `GOARCH=arm64` 一致；`/data/local/tmp` 可读写。**真机不在线对本方案零影响** —— 唯一能 exec 的设备就是这台模拟器，别为凑真机花时间。）
-- **`-race` 开门即崩。** TSAN 硬要求 48 位 VMA，设备只有 39 位。所有 `-race` 变体不是在"验证功能"，是在验证一个已知不行的事实。
+- **`-race` 不在本方案范围内，且不打算补。** 它是开发期诊断工具，产物永远不带；设备只有 39 位 VMA，而 Go 的 race runtime 硬编在 48 位布局上（四层闸、上游立场、替代路径见 `go-upgrade-guide.md` §4.2 的 `-race` 行）。所有 `-race` 变体不是在"验证功能"，是在验证一个已知不行的事实。**竞态要在宿主上验。**
 - **单设备串行是硬约束。** `go_openharmony_exec` 用 `flock` 把所有 hdc 访问串行化（`lock()`，因为 hdc 本身不安全并发），而 `go test` 默认并行跑包。所以 262 个有测试的包实际是**顺序** push + run，吞吐上不去。多设备并行也不成立——只有一台能 exec。
 - **因此全量一轮是小时级，不是分钟级。** 估算见第 6 节。方案必须设计成**可中断、可续跑、可分批**，不能指望一把梭跑完。
 
@@ -142,7 +142,7 @@ go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 
 | **依赖 `testdata/` 的测试** | **已修**（阶段 0.4） | 原缺口：包装不推送包的源文件树（修前实例：`text/template` 的 `TestParseFiles` → `open testdata/file1.tmpl: no such file`）。hdc 的 `file send` 递归拷目录，所以一次调用把源码和 `testdata/` 一起带过去 |
 | **需要 `$GOROOT` 落地的测试** | **阶段 2 实测已确认**，两个包 | 包装**不像** `go_android_exec` 那样把 GOROOT 拷到设备（它 527 行 vs 我们 264 行，少了 `adbCopyGoroot`/`adbCopyTree`/`pkgPath`）。实测命中 `time`（下详）。**注意这一类里有两种，可修性完全不同**，见下方「源文件可用性」 |
 | **任何依赖环境变量的测试** | **预期必挂** | **包装不下发 env**：`run()` 里 `cmd.Env` 未设，命令行只有二进制路径（`exec.Command(hdcPath, append(hdcArgs(target), "shell", cmdline+"; echo "+exitStr+"$?")...)`）。宿主 env 到不了设备进程。**这条推翻了本表原本对 `crypto/x509` 的处方** —— 「设 `SSL_CERT_FILE` 就好」是错的，宿主设了没用。**env 白名单后来已在 §5.6 补上**；而 x509 本身已于 2026-09-22 用 HAP 夹具在**应用域**定案：**根本不用设这个 env**，见 §5.3 的收口段 |
-| `-race` 变体 | 不开门 | 39 位 VMA vs TSAN 要求 48 位（§4.2） |
+| `-race` 变体 | 不开门 | 39 位 VMA vs Go race runtime 的 48 位布局；诊断工具，本方案不覆盖（§4.2），竞态在宿主上验 |
 | `-msan` 变体 | 不开门 | SDK 无 `libclang_rt.msan*`，且 MSan 要求插桩 libc（§4.2） |
 | `crypto/x509` 系统根 | **已定性：`sh` 域假象，非 port 缺陷**（2026-09-22） | 设备上 `/etc/ssl/certs` 对 shell uid 是 EACCES；**应用域读得到**（HAP 夹具四环实测，`cacert.pem` 125 张全解），上游 `certDirectories[0]` 本来就命中。详见 §5.3 收口段 |
 | **环回 TCP listen 被禁** | **预期必挂，整类** | 模拟器 shell 域不许 `net.Listen("tcp4","127.0.0.1:0")` 也不许 tcp6。`nettest.probeStack`（`src/vendor/golang.org/x/net/nettest/nettest.go:37`）两个探针都失败 → 报 `tcp is not supported on linux/arm64`（措辞里的 `linux` 正是 split identity 的直接体现）。已见实例：`os` 的 `TestSendFile/sendfile-to-tcp/*`。**凡需要本地监听端口的包（`net`、`net/http`、`crypto/tls`）都会撞上**，这是除权限之外最大的一类环境噪音 |
@@ -407,11 +407,14 @@ zero symbol index」**由推测变成实测**。加上两条代码事实，amd64
 |---|---|---|---|
 | **设备上没有 C 编译器** | `runtime`（9 个 cgo 测试） | `//go:build cgo` 的文件**在宿主交叉编译时被编进设备二进制**（`runtests.sh` 用 `CGO_ENABLED=1`），但设备 `go build` 出来的 `testprogcgo` 没有 cgo → 二进制打印 `unknown function: …`。`crash_cgo_test.go` 只守卫 `MustHaveGoBuild`，**没守卫 cgo** | **不改**。归类为设备能力限制 |
 | **设备上没有 `git`** | `crypto`、`internal/platform`（经 `go tool dist`） | `findgoversion()` 读不到 `$GOROOT/VERSION` 才回落 `git log` | 镜像 `VERSION` 后**已消** |
-| **上游测试自身的 testdata 缺口** | `go/internal/gccgoimporter` | `testdata/importsar.gox` 在 HEAD 里就不存在，**宿主上跑同一条 `TestGoxImporter` 也失败**（同一条报错） | **不是 port 缺陷**。要修得往上游提 |
+| **~~上游测试自身的 testdata 缺口~~**（**2026-09-23 订正：误诊**） | `go/internal/gccgoimporter` | 原判据「`testdata/importsar.gox` 在 HEAD 里就不存在」**是错的**：那个文件名根本不存在、上游也没有过。真实原因是**导入 fork 时丢了 10 个上游跟踪的二进制 testdata**（被 `.gitignore` 吞掉），所以「宿主上也同一条报错」——**同一个仓库缺陷在两边都复现，看起来像上游问题** | **是本仓库的缺陷，已修**（beta2 按上游 blob sha 逐字节补回，release notes §7）。**产物上这个包已 PASS**，见 §5.8 |
 
 **为什么不跟上游 android 那样直接 `export CGO_ENABLED=0` 把类 1 抹平**：那个变量是**构建配置**，不是环境旋钮。`src/go/build/build.go:360` 读的就是 `os.Getenv("CGO_ENABLED")`，导出去等于翻转**每个测试进程**的 `build.Default.CgoEnabled` —— 把「设备上编不了 C」这条真事实盖住，换来一个假的绿。宁可留 9 个 FAIL 并记成本类。
 
-**残留 23 个 FAIL 的构成**：环回类 17 包（含新到的 `internal/trace`）、unix socket/SCM_RIGHTS（`syscall`）、设备权限模型（`os`、`time` 的 `/usr/share`，**`crypto/x509` 那条已移出** —— 2026-09-22 应用域复验证明是 `sh` 域假象，见 §5.3）、设备无 C 编译器（`runtime` 的 9 个）、上游 testdata 缺口（`go/internal/gccgoimporter`），外加 `runtime` 的 `TestTracebackSystem`（要 `-trimpath`，见 §5.2）。**除最后两项外，没有一条是 port 缺陷。**
+**残留 23 个 FAIL 的构成**：环回类 17 包（含新到的 `internal/trace`）、unix socket/SCM_RIGHTS（`syscall`）、设备权限模型（`os`、`time` 的 `/usr/share`，**`crypto/x509` 那条已移出** —— 2026-09-22 应用域复验证明是 `sh` 域假象，见 §5.3）、设备无 C 编译器（`runtime` 的 9 个）、~~上游 testdata 缺口（`go/internal/gccgoimporter`）~~（**已修，产物上 PASS，见 §5.8**），外加 `runtime` 的 `TestTracebackSystem`（要 `-trimpath`，见 §5.2）。**除最后一项外，没有一条是 port 缺陷。**
+
+> **这一节的数字只在它那棵树上成立。** 2026-09-23 在**交付物**上重跑是 **240 / 22**
+> （§5.8）—— 树的指纹不同，结论就不能互相背书，这正是指纹存在的原因。
 
 **本节最重要的结论不是那 13 个包，而是覆盖率的教训**：这一节之前 sweep 是 226 PASS、看起来「已知类都解释完了」，而 §5.4 那个静默的 FIPS 缺陷**从来没被 sweep 抓到过**（`crypto/internal/fips140only` 全量轮一直 PASS）。**全绿 ≠ 没缺陷** —— 链接期/运行期成对的机制、以及只在特定 GODEBUG 下才走的路径，必须在设备上单独实测。
 
@@ -547,6 +550,78 @@ C 层把它暴露成 `test/typeparam/issue50109.go`：`.out` 是 17 字节的无
 
 ---
 
+### 5.8 在**交付物**上重跑 B 层（2026-09-23）：240 PASS / 22 FAIL，并抓到一个缺陷
+
+§5.6 那一轮 23 个 FAIL 是在**开发树**上量的。§5.1 起的那个树指纹就是为了堵这个口子：
+**指纹只是手段，「用户拿到的那棵树」才是目的。** 所以这一轮把 `--toolchain` 指向
+**tarball 解包出来的树**（`~/tmp/gate2-verify/go1.27.1-ohos`），而不是开发树：
+
+```bash
+misc/openharmony/runtests.sh --all \
+  --toolchain /Users/xiphis/tmp/gate2-verify/go1.27.1-ohos \
+  -o ohos-test-results/release-tree      # `-o` 别省：默认目录是全量轮的，混进去之后
+                                         # `wc -l` 那类按行数读的口径就咬人（见 ⑩）
+```
+
+**结果**（`ohos-test-results/release-tree/`，262 行，`跳过已 PASS 0` —— 即每一行都是本轮
+当场跑出来的，没有一条是从别的树蹭来的）：
+
+| | |
+|---|---|
+| PASS / FAIL | **240 / 22** |
+| TIMEOUT / WRAPPER | 0 / 0 |
+| 树指纹 | `743723f328668157666b2156794f36b5772dee35a74fe2dabc61b913bdd3a01e`（262 行的 `toolchain` 列逐行相同） |
+
+**这一轮抓到了一个真缺陷**（release notes 已知问题 7c）：交付的 tarball 里
+`bin/go_openharmony_{arm64,amd64}_exec` 嵌着构建机绝对路径，解包到别处之后凡是跨目录读
+`testdata` 的用例都 ENOENT 假红，**12 个包**。开发树上全绿，产物上红 —— 因为开发树里包装
+自带的路径**恰好就是构建路径**。根因是 `findGoroot` 优先信 `runtime.GOROOT()`，而那个值被
+编死成了构建机路径。修法两层：构建期补 `-trimpath`（`cmd/dist` 的包装构建那条独立
+`goCmd` 不吃 `GOFLAGS`），运行期改成先按**自身所在路径**推 GOROOT。污染那一轮存档在
+`ohos-test-results/release-tree-prewrapperfix/`（183 行 / 163 PASS / 20 FAIL，其中 12 条是
+ENOENT 特征）。修完后 12 个包**全部转绿**。
+
+> **2026-09-23 收尾：上面这棵树（指纹 `743723f3…`）就是重打后两份资产的打包源**
+> （指纹只算 `bin/` 顶层，文档改动不进），所以「修完后全绿」这句现在**直接适用于你下载到的那份包**。
+> 首版资产（修复前那两份）已同名替换、tag 未动；这条闭环**是重打换来的**，不是指纹自动保证的。
+
+**22 个 FAIL 的构成**（按包名逐个数出来，不是估的）：
+
+| 类 | 包数 | 包 |
+|---|---|---|
+| 环回被禁（`sh` 权限域 ≥1024 端口 bind 被拒） | **17** | `compress/gzip`、`context`、`crypto/tls`、`encoding/json`、`internal/trace`、`log/syslog`、`net`、`net/http`、`net/http/cgi`、`net/http/cookiejar`、`net/http/httptest`、`net/http/httputil`、`net/http/internal/http2`、`net/http/pprof`、`net/rpc`、`net/smtp`、`os/exec` |
+| `sh` 域读不了 `/etc/ssl/certs` | 1 | `crypto/x509`（§5.3 那条，与 7c 无关） |
+| unix socket / `SCM_RIGHTS` | 1 | `syscall` |
+| 设备权限模型 | 2 | `os`、`time` |
+| 设备无 C 编译器（9 个 cgo 用例）+ `TestTracebackSystem` | 1 | `runtime` |
+
+**除已知类外没有新东西**；`runtime` 那条报错里带的绝对路径**正好是产物自己的路径**，
+反过来证明设备上的 GOROOT 镜像这次是对的。
+
+**和 §5.6 那个 23 的差**：**少 1 个**，差在 `go/internal/gccgoimporter` —— 它在产物上
+PASS 了，对应 release notes §7（beta1 那条「上游 testdata 缺口」是**误诊**，真实原因是导入
+时被 `.gitignore` 吞掉 10 个上游二进制 testdata，beta2 已按 blob sha 补回）。**这里要克制**：
+两轮 FAIL 集合没有做过全量逐包对账（开发树 v3 那轮的 `results.tsv` 没进仓库），所以
+「23 → 22 恰好只差 gccgoimporter」是**单点核对 + 其余类目对齐**得出的，不是集合相等证明。
+`ohos-test-results/` 整个目录在 `.git/info/exclude` 里，**是本地证据不是仓库内容** ——
+引用它等于引用这台机器，重跑命令就在上面。
+
+**顺带修掉的一处判据缺陷（本节最该记住的）**：7c 的检查原先写成
+`strings "$f" | grep -cF "$PWD"`。这条**只在「站在构建树自己的路径上」时有效** ——
+换成解包到别处的树，`$PWD` 不是构建路径，计数**恒为 0**，缺陷再明显也照过。
+实测：带着 366 条绝对路径的那棵包装，在解包目录里跑这条判据**返回 0**。可移植的写法是查
+**「有没有绝对路径形态的 `.go` 串」**：
+
+```bash
+for f in bin/*; do [ -f "$f" ] || continue
+  printf '%6s  %s\n' "$(strings "$f" | grep -cE '^/[^ ]*\.go$')" "$f"; done   # 每行都必须是 0
+```
+
+同一棵树实测：修复后的包装 `0`，未修复的 `174`（连带绝对路径串 366 条）。判据本身
+路径无关，所以它同时能用来看**别人给的包**。§6.7 / §6.8 / 安装文档 / CI 那四处已按这一条改。
+
+---
+
 ## 6. 耗时估算（为什么必须分批）
 
 单设备串行。每个 std 包 = build + push + run：
@@ -617,8 +692,9 @@ C 层 ~1220 例设备执行，**2–5 小时**。
 | 2026-09-21 | B 层（v1 基线） | 226 PASS / 36 FAIL | §5.3（36 条全落已知类；真缺陷 FIPS **不在这 36 条里**，见 §5.4） |
 | 2026-09-21 | B 层（v3，镜像 GOROOT 后） | **239 PASS / 23 FAIL** | §5.6 |
 | 2026-09-22 | C 层（`test/`） | **2739 RUN / 132 FAIL** | §5.7（125 条是 testdir 载体限制，7 条逐条有据） |
+| 2026-09-23 | B 层（**交付物**上重跑，修完 7c 后） | **240 PASS / 22 FAIL** | §5.8（12 个包转绿；22 条全落已知类；**指纹 `743723f3…`**） |
 
-两轮合计**没有一条未定性的 port 缺陷**。上一代（go1.26.5）此处的记录是「224 PASS / 38 FAIL / 1 条真缺陷（FIPS）」——
+三轮合计**没有一条未定性的 port 缺陷**（第三轮抓到的是**夹具**缺陷，不是 port 缺陷）。上一代（go1.26.5）此处的记录是「224 PASS / 38 FAIL / 1 条真缺陷（FIPS）」——
 注意那条 FIPS 缺陷是**靠 §5.4 那种定向验证**才现形的，全量轮当时是绿的。
 
 脚本已兑现的特性：

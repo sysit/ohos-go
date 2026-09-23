@@ -1698,7 +1698,14 @@ func cmdbootstrap() {
 		os.Setenv("GOOS", gohostos)
 		os.Setenv("GOARCH", gohostarch)
 		os.Setenv("CC", compilerEnvLookup("CC", defaultcc, gohostos, gohostarch))
-		goCmd(nil, gorootBinGo, "build", "-o", pathf("%s/go_%s_%s_exec%s", gorootBin, goos, goarch, exe), wrapperPath)
+		// -trimpath, the same thing the release builds above get through
+		// GOFLAGS. This wrapper ships inside the tarball, and without it, it is
+		// the one binary in bin/ that carries the builder's absolute paths: the
+		// tarball leaks the build directory and stops being reproducible, and
+		// runtime.GOROOT() inside the wrapper stays the builder's path --
+		// exactly what findGoroot in misc/go_openharmony_exec cannot be told to
+		// trust if an unpacked tree is going to work anywhere but there.
+		goCmd(nil, gorootBinGo, "build", "-trimpath", "-o", pathf("%s/go_%s_%s_exec%s", gorootBin, goos, goarch, exe), wrapperPath)
 		// Restore environment.
 		// TODO(elias.naur): support environment variables in goCmd?
 		os.Setenv("GOOS", goos)

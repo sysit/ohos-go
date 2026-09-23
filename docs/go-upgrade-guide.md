@@ -157,7 +157,7 @@ comm -23 /tmp/up.txt /tmp/local.txt        # 输出必须为空
 | `shared` | ✅ 可用 | `libstd.so`（74 MB）+ `LD_LIBRARY_PATH` → `-linkshared` 宿主打印 42 |
 | **cgo 可执行文件** | ✅ 默认即可（无需再加 `-buildmode=pie`） | 2026-09 起 `platform.DefaultPIE` 对 openharmony 返回 true，默认 buildmode 本身就产出可运行的 PIE。改之前默认 buildmode 下任何 `import "C"` 的程序在 `init()` 之前 `Signal 11`（exit 139）。最小复现：`misc/openharmony/cgomin` |
 | `-asan` | ✅ 可用（需 PIE，默认 buildmode 现已满足） | 设备上打印 `ERROR: AddressSanitizer: heap-buffer-overflow` + `0 bytes to the right of 4-byte region`；§7 的命令仍显式写 `-buildmode=pie`，无害 |
-| `-race` | ❌ 不可用（不开门） | TSAN 的 arm64 `InitializePlatformEarly` 硬要求 48 位 VMA（`cmp #48` / `b.ne` → `unsupported VMA range`），而设备用户地址空间只有 39 位：ASan 自报 `HighMem [0x002000000000, 0x007fffffffff]`，探针 `vma_bits_stack=38`。TSAN shadow 在 32 TiB（45 位）处，够不着。开了只会把构建期一句清楚报错换成运行期 sanitizer 崩溃 |
+| `-race` | ❌ 不开门 —— **「不移植」是决策，不是欠债** | **先定性**：`-race` 是开发期诊断工具，交付产物永远不带它（慢 5~20 倍、内存翻 5~10 倍）。缺它影响的是「能不能在设备上跑竞态检测」，不是「能不能在设备上跑 Go」—— 下游 v2rayHM / xray / sing-box 的发行产物没有一个用 `-race` 编。**为什么不开：四层闸。** ① 我们：`platform.RaceDetectorSupported` 无 openharmony case → 构建期一句干净报错（上游 arm64 一律返回 true，因为它编译期不知道 VMA 大小 —— 我们拦住更合理，**保持不动**）。② `runtime/race/race.go` 的 build constraint 只列 `linux`。③ race runtime 是**预编译 blob**（`runtime/race/*.syso`），按文件名蕴含的 `linux && arm64` 选中，仓里**没有 C++ 源码**，是 LLVM compiler-rt 的 `SANITIZER_GO` 产物、靠 `.patch` 跟 LLVM 走。④ `runtime/malloc.go` 把 race 堆硬编在 `[0x00c000000000, 0x00e000000000)`＝824 GiB，39 位（512 GiB）装不下（riscv64 有 39 位分支，arm64 没有）。**上游立场**（firecracker#3514 关成 not-a-bug、golang/go#29948 同）：*"if Go does not support the smaller address space, then your own change to the kernel configuration is a requirement"* —— 平台自己调 VMA，Go 不适配。**替代路径**：竞态在宿主上验（`GOOS=linux GOARCH=amd64 go test -race`，不需要 OHOS SDK，见 `docs/ohos-release-roadmap.md` §④）；原生胶水层另走 C++ 侧 `-fsanitize=thread`（**非** `SANITIZER_GO` 的 aarch64 TSan 收 39 位，与 Go 那条线不同）。**何时重估**：OHOS 改 VA / 页大小配置时。`ARM64_VA_BITS_39` 在 Kconfig 里 `depends on ARM64_4K_PAGES` —— 39 位绑死 4KB 页，16KB 页下必然 ≥42 位（3 级）或 47 位（4 级），而 47 在 Go 的允许集里。**这条是推断，未验** —— 拿到 16KB 页设备时顺手打 `probe` 的 `vma_bits_*` 和 `go test -race` |
 | `-msan` | ❌ 不可行 | SDK 里 `libclang_rt.msan*` 为零，且 MSan 要求插桩过的 libc，OHOS musl 不是 → 每个 libc 调用都会假阳性。`MSanSupported` 的 `default: return false` 保持不动 |
 | SVE | ✅ 汇编器可用（需 `GOEXPERIMENT=simd`） | `ZADD Z7.D, Z23.D, Z13.D` 为 `openharmony/arm64` 编出 `04e702ed`，与上游 `arm64sveenc.s` 期望的 `ed02e704` 逐字节相符。硬件执行未验：shell uid 读不了 `/proc/cpuinfo` |
 | x509 系统根 | ✅ **应用域直接可用，不需要任何 env** | 本条原先记的是「❌ 外部进程取不到，正解是 `SSL_CERT_FILE`」—— **那是把 `sh` 域的载体限制当成了平台限制**，与下一行的环回是同一类错误（`sh` 域观测到的 `open /etc/ssl/certs: permission denied` 不能外推到应用域）。2026-09-22 用 `loopbackhap` 夹具在应用域（uid `20020077`）按 Go 的真实读取路径逐环验：`ReadDir("/etc/ssl/certs")` OK（1 条目 `cacert.pem`）→ 该条目 `lstat` **非软链**（否则会被 `readUniqueDirectoryEntries` 丢掉，成空池静默失败）→ `ReadFile` OK（191450 B，真 PEM）→ 同一份字节在宿主 `AppendCertsFromPEM` **125/125**。故 `root.go:199` 返回非空池。**不加 `root_openharmony.go` 这个结论是对的，但理由与当初写的相反：不是「取不到所以用 env」，是「上游 `certDirectories[0] = /etc/ssl/certs` 本来就命中 OHOS 的 bundle 目录」。** 唯一真缺口：`/data/certificates/user_cacerts`（OHOS 用户 CA）应用域 EACCES → **用户自装 CA 取不到**，照抄 Android 那两行无效（问题是权限不是路径），要做得走 OHOS cert framework + cgo，是**真特性不是补丁** |
@@ -341,7 +341,7 @@ OHOS 在 `go_test.go` 定义了 `goos`（= "openharmony" when IsOpenharmony）�
 ```bash
 cd ~/projects/ohos-go
 rsync -a --delete \
-  --exclude '.git/' --exclude 'bin/' --exclude 'pkg/' \
+  --exclude '.git/' --exclude '/bin/' --exclude '/pkg/' \
   --exclude 'src/cmd/dist/dist' --exclude '.DS_Store' \
   --exclude '.claude/' --exclude 'CLAUDE.md' --exclude 'resume.sh' \
   --exclude 'ohos-test-results*' \
@@ -352,14 +352,22 @@ rsync -a --delete \
 cd ~/go1.27.1-ohos && rm -rf bin pkg
 cd src && GOTOOLCHAIN=local GOPROXY=off \
   GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec ./make.bash
-cd ../misc && ../bin/go build -o ../bin/go_openharmony_arm64_exec ./go_openharmony_exec
+cd ../misc && ../bin/go build -trimpath -o ../bin/go_openharmony_arm64_exec ./go_openharmony_exec
 cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 ```
 
 排除项各有原因：
 
-- **`bin/`、`pkg/`**：构建产物，交给 `make.bash` 自己维护。但**排除了不等于不用管** ——
+- **`/bin/`、`/pkg/`**：构建产物，交给 `make.bash` 自己维护。但**排除了不等于不用管** ——
   这两棵子树里是上一版的产物，而 `make.bash` 是增量的，所以下面那条 `rm -rf` 不能少。
+  > **前导斜杠是必须的（2026-09-23 实测）。** 不锚定的话 `pkg/` 匹配**任意层级**的 `pkg` 目录，
+  > 而树里有两个是上游签入的**测试数据**：`src/cmd/api/testdata/src/pkg`（10 个文件）与
+  > `src/simd/testdata/pkg`（1 个）。写了 `'pkg/'` 它们就被静默丢掉 —— 11 个上游文件，
+  > 在发布树里不存在。`bin/` 目前只有根目录那一处，但一并锚定，免得下一个 `testdata/bin/`
+  > 再咬一次。
+  > 实测判据（两种写法跑一遍就看出差别）：
+  > `rsync -a --dry-run --itemize-changes --exclude 'pkg/' ./ /tmp/probe/ | grep -c cmd/api/testdata/src/pkg`
+  > —— `'pkg/'` 得 0，`'/pkg/'` 得 16。
 - **`ohos-test-results*`**：全量测试的落盘目录。它不是源码，`--delete` 会顺手删掉，
   所以显式豁免（rsync 的 `--delete` 不会删被排除的路径）。
 - **`loopbackhap/.hvigor/`、`loopbackhap/entry/build/`、`loopbackhap/local.properties`**：
@@ -382,6 +390,54 @@ cp ../bin/go_openharmony_arm64_exec ../bin/go_openharmony_amd64_exec
 > **没带 release 标志**的工具二进制会被原样留下，而它每次退出码都是 0。判据见 §6.8。
 
 `-exec` 包装仍需手装：普通 `make.bash` 的 `goos == gohostos`，`wrapperPathFor` 返回空（见 §4.2）。
+
+> **手装这条命令里的 `-trimpath` 不能省（2026-09-23 定案，beta2 就是在这儿翻的车）。**
+> 这是 `bin/` 里**唯一**由手工命令产出、因而不吃 `GOFLAGS` release 标志的二进制
+> （`cmd/dist` 里的那份在 `build.go:1708`，自带 `-trimpath`）。少了它，包装是整棵发布树里
+> 唯一嵌着构建机绝对路径的文件，两个后果：
+> 1. tar 包里泄出构建目录；
+> 2. 包装内的 `runtime.GOROOT()` 是**构建机**的路径，而 `findGoroot`
+>    （`misc/go_openharmony_exec/main.go`）优先信包装自身位置、只把 `runtime.GOROOT()`
+>    当兜底 —— 于是解包到别处的树拿到的 host GOROOT 是错的，
+>    `deviceCwdFor` 算出跨目录的 `../..`，退化成 `pushSourceTree`（只镜像包目录），
+>    所有 `../../testdata/...` 读操作 ENOENT。**症状是 12 个包在设备上假红，看起来像 port 缺陷。**
+> 现在有 `TestGorootFromExecutable` 钉住「自身位置优先」这条规则，但那测的是**规则**，
+> 树的属性只能靠下面这条检查。
+
+手装完 **必须查「树里没有构建机路径」**（`bin/go` 为 0 不代表整棵 `bin/` 为 0 —— 这正是 CI
+只查 `bin/go` 时漏掉它的原因）：
+
+```bash
+cd ~/go1.27.1-ohos
+for f in bin/*; do [ -f "$f" ] || continue
+  printf '%6s  %s\n' "$(strings "$f" | grep -cE '^/[^ ]*\.go$')" "$f"
+done        # 每一行都必须是 0
+```
+
+**判据要用上面这条「绝对路径形态的 `.go` 串」，不要用 `grep -cF "$PWD"`**（2026-09-23 订正）：
+后者只在**站在构建树自己的路径上**时有效。解包到别处之后 `$PWD` 不是构建路径，计数
+**恒为 0** —— 实测拿**beta2 首版 darwin 资产**跑那种写法得 `0`（看着干净），
+换上面这条得 `174`（缺陷现行）。改后的判据路径无关，所以它**同时能用来看别人给的包**，
+这也是「拿到别人的包先验一下」的入口。取证见测试方案 §5.8。
+（那份首版资产 2026-09-23 已同名重打成修好的版本，这里引用的是留档的取证。）
+
+> **顺带一条同类的存在性检查**（上游有、同步后没有 —— `git diff` 和 rsync 都看不见）：
+> ```bash
+> cd ~/projects/ohos-go
+> prune=( -path ./.git -prune -o -path ./pkg -prune -o -path ./bin -prune -o
+>         -path ./.claude -prune -o -name CLAUDE.md -prune -o -name resume.sh -prune -o
+>         -name 'ohos-test-results*' -prune -o -name .DS_Store -prune -o
+>         -path './misc/openharmony/loopbackhap/.hvigor' -prune -o
+>         -path './misc/openharmony/loopbackhap/entry/build' -prune -o
+>         -name local.properties -prune -o -type f -print )
+> diff <(find . "${prune[@]}" | LC_ALL=C sort) \
+>      <(cd ~/go1.27.1-ohos && find . "${prune[@]}" | LC_ALL=C sort)
+> ```
+> **空输出才算过。** 上面那条锚定 `pkg/` 的坑就是它抓出来的那类问题（11 个上游 testdata）。
+> 必须把 rsync 的排除项原样再排一遍 —— 不排就报 261 行，全是**故意不同步**的东西
+> （`.hvigor/`、`entry/build/`、`CLAUDE.md`…），等于没有这条检查。
+> 2026-09-23 实测：不发散的树上输出为空；从装好的树里删掉一个 `golden.txt` 会打
+> `325d324 < ./src/cmd/api/testdata/src/pkg/issue79145/golden.txt`。
 
 刷新后的三连验收：
 
@@ -418,7 +474,9 @@ PATH="$HOME/go1.27.1-ohos/bin:$PATH" GOOS=openharmony GOARCH=arm64 ../bin/go tes
 > 症状是 `bin/go` 里嵌着绝对路径、`compile` 带 DWARF（36.2 MB vs 正常的 27.1 MB），
 > 而 `make.bash` 每次退出码都是 0。**这不是路径太长之类的无害差异** ——
 > `-trimpath` 是发布构建的硬要求。
-> 判据与修法：`strings bin/go | grep -c '<树的绝对路径>'` **必须是 0**；
+> 判据与修法：**整棵 `bin/` 顶层每个文件**的「绝对路径形态 `.go` 串」计数**都必须是 0**（循环见 §6.7；
+> 只查 `bin/go` 会漏掉手装的 `_exec` 包装 —— 2026-09-23 就是这么漏的，见已知问题 7c；
+> 而 `grep -cF "$PWD"` 那种写法在解包后的树上恒为 0，同样看不见 —— 两处都踩过）；
 > 且 `pkg/tool/darwin_arm64/{compile,link,asm,cgo}` 的 sha256 应与本仓库的一致。
 > 不符就 **`rm -rf bin pkg` 后重跑 `make.bash`**（强制全量，别指望增量自己发现）。
 
@@ -434,9 +492,15 @@ cd ~ && tar czf /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
   --exclude='go1.27.1-ohos/pkg/tool/openharmony_*' \
   --exclude='.DS_Store' \
   go1.27.1-ohos
-shasum -a 256 /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
-  | tee /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz.sha256
+(cd /tmp && shasum -a 256 go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
+  | tee go1.27.1-ohos-beta2-darwin-arm64.tar.gz.sha256)
 ```
+
+> **摘要必须在包的目录里用「相对文件名」生成**（2026-09-23 实测踩到）：写绝对路径的话
+> `.sha256` 里存的是 `/tmp/...` 或 `/opt/...`，而 release notes 让用户跑的是
+> `shasum -a 256 -c <那个文件>` —— 在**用户自己的下载目录**里，那个绝对路径不存在，
+> 于是校验报 `FAILED open or read`。首版 beta2 的两份 `.sha256` 是相对名（105/106 字节），
+> 这是“顺手一敲就错、错了还看不出”的那类形状问题：**校验文件里只能有文件名**。
 
 > **那两个 `openharmony_*` 排除项是 2026-09-23 补的，别删。** 在装好的树上跑过设备测试之后，
 > 树里会多出 `bin/openharmony_arm64/` 与 `pkg/tool/openharmony_arm64/` —— 那是 `-exec` 包装
@@ -461,8 +525,8 @@ cd /root/ohos-go && tar czf /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
   --exclude='./misc/openharmony/loopbackhap/entry/build' \
   --exclude='./misc/openharmony/loopbackhap/local.properties' \
   .
-sha256sum /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
-  | tee /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz.sha256
+(cd /opt && sha256sum go1.27.1-ohos-beta2-linux-amd64.tar.gz \
+  | tee go1.27.1-ohos-beta2-linux-amd64.tar.gz.sha256)   # 相对名，同上
 ```
 
 > `--transform` 那条**必须拆成两个**：只写 `^\./` 的话，`tar ... .` 产生的那个裸 `.`

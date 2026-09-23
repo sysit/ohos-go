@@ -143,6 +143,26 @@ GOOS=openharmony GOARCH=arm64 go test strings
 - **已知限制**：`hdc shell` 的回程**传不了 NUL**（NUL 处截断），且 shell 域（`uid=2000`）
   **不能 bind `127.0.0.1`**。后者是权限域限制，不是 port 缺陷 —— 应用域可以，
   证据见 `misc/openharmony/loopbackhap/README.md`。
+- ⚠️ **2026-09-23 之前下载的 beta2 包，这个包装是坏的**（两份宿主包都是）：它嵌着构建机的
+  绝对路径，**解包到别处之后**跑设备测试时，凡是跨目录读 `testdata` 的用例都 ENOENT 假红
+  （12 个包）。**不影响交叉编译。** 已修并**同名替换**了资产 —— **重新下一次**就行
+  （tag 与提交没动，变的只有这个包装和几份文档），细节见 release notes 已知问题 7c。
+- 拿到任何一棵树（自己重编的、或别人给的包）想验一下，跑这条 —— **每一行都必须是 0**：
+
+  ```bash
+  cd <树根> && for f in bin/*; do [ -f "$f" ] || continue
+    printf '%6s  %s\n' "$(strings "$f" | grep -cE '^/[^ ]*\.go$')" "$f"; done
+  ```
+
+  判据是**「二进制里有没有绝对路径形态的 `.go` 串」**，与你在哪、树在哪无关 ——
+  所以它能用来看**别人的包**。**别用 `grep -cF "$PWD"` 那种写法**：它只在
+  「站在构建树自己的路径上」时有效，解到别处之后 `$PWD` 不是构建路径，计数**恒为 0**，
+  缺陷再明显也照过（实测：首版 beta2 那份带 366 条绝对路径的包装，用那种写法查出来是 0）。
+
+  万一需要自己重编包装（比如拿的是别处来的树）：`cd <树根>/misc && ../bin/go build -trimpath
+  -o ../bin/go_openharmony_arm64_exec ./go_openharmony_exec && cp ../bin/go_openharmony_arm64_exec
+  ../bin/go_openharmony_amd64_exec`（**`-trimpath` 不能省**）。
+
 
 ## 改过工具链之后
 

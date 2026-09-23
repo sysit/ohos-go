@@ -6,6 +6,9 @@
 #	runtests.sh io/fs text/template   只跑指定包
 #	runtests.sh --all            B 层全量：std 里有测试的包
 #	runtests.sh --list           只打印将要跑的清单，不跑
+#	runtests.sh --toolchain DIR  换一棵树跑（验收交付物：解包出来的 tar）
+#	runtests.sh -o DIR           换结果目录（默认 ohos-test-results）
+#	runtests.sh --selftest       只验「跳过判据」，不碰设备
 #
 # 默认给 go test 加 -short。**这不是偏好，是设备物理上跑不动**：4GB guest 装不下
 # 那些「按平台位数模拟海量条目」的测试。2026-09-21 实测 archive/zip 的
@@ -18,6 +21,12 @@
 # 定位」：go test 自己的 -timeout 是**设备侧测试二进制**执行的，一旦 hdc 卡住，
 # 主机侧没有任何东西会杀掉这次调用，整个后台任务会静默躺平。这里给每个包配
 # 主机侧墙钟和独立日志，结论追加到 results.tsv，重跑自动跳过已 PASS。
+#
+# 结论按**树指纹**记账。results.tsv 是追加写的、重跑跳过已 PASS，所以在一棵改过的
+# 树上重跑时，它会把上一轮的 PASS 当本轮结论用掉 —— 看着全绿，但那个「测过了」说的
+# 是另一棵树（docs/ohos-release-roadmap.md ⑩）。现在每行都带整棵 bin/ 的 sha256，
+# 指纹不同就不复用（旧格式的行没有指纹，一律重跑）。**发版前必须在交付物上跑一遍**：
+#	runtests.sh --all --toolchain <解包出来的那棵树> -o ohos-test-results/release-tree
 #
 # 环境：
 #	OHOS_SDK	OpenHarmony SDK 根目录（默认 DevEco Studio 的那个）
@@ -34,8 +43,9 @@
 set -u
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-SRC="$REPO/src"
-GOTOOL="$REPO/bin/go"
+ROOT=$REPO          # 被测树。--toolchain 把它指向解包出来的交付物
+EXTERNAL=0
+SELFTEST=0
 
 OHOS_SDK=${OHOS_SDK:-/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony}
 OHOS_TARGET=${OHOS_TARGET:-127.0.0.1:5555}
@@ -52,8 +62,98 @@ ALL=0
 die() { echo "runtests.sh: $*" >&2; exit 1; }
 
 usage() {
-	sed -n '2,26p' "$0" | sed 's/^#\{1\} \{0,1\}//'
+	# 别按行号截：头部注释一改就悄悄截错。打到 `set -u` 前一行为止。
+	sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^#\{1\} \{0,1\}//'
 	exit "${1:-0}"
+}
+
+# 取 bin/ 下每个文件的 sha256 当树指纹，而不是 git HEAD：交付物是一棵**解包出来的 tar**，
+# 里面没有 .git。而 bin/ 就是「哪把编译器编的这些测试二进制」的答案，
+# 也正是 soak 文档要设备侧填的同一个数 —— 全项目只用一个指纹，免得两边对不上。
+#
+# 覆盖整个 bin/ 而不是只取 bin/go（2026-09-23 改）：那天实测到两棵树 bin/go 逐字节相同
+# （sha256 都是 9cfddd97...）而 bin/go_openharmony_arm64_exec 不同 —— 一个嵌着构建机的
+# 绝对路径、一个没有。只认 bin/go 会把这两棵树认成同一棵，于是「A 树跑绿」的结论被 B 树
+# 静默复用，正是这个指纹存在的目的。列名仍叫 toolchain，值已改成整棵 bin/ 的哈希。
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+sha256_stdin() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | cut -d' ' -f1
+	else
+		shasum -a 256 | cut -d' ' -f1
+	fi
+}
+
+# 带相对路径一起哈希，这样「同名不同内容」和「多一个/少一个文件」都算换树。
+#
+# **只取 bin/ 顶层的文件（-maxdepth 1），子目录不算** —— 这不是随手写的：`bin/openharmony_arm64/`
+# 是包装按需编出来的**目标架构工具链缓存**（见 guide §6.8），第一次跑设备测试时它会自己长出来。
+# 把子目录算进去的话指纹会在**跑的过程中**变，于是每次断点续跑都算出新指纹、把上一轮的
+# PASS 全部作废、从零重跑 —— 正好把这个脚本存在的理由（可中断可续跑）废掉。
+# 顶层文件恰好就是会发出去的那几个（go、gofmt、两个 _exec 包装），也就是该被钉住的东西。
+tree_fingerprint() {
+	find "$ROOT/bin" -maxdepth 1 -type f | LC_ALL=C sort | while read -r f; do
+		printf '%s %s\n' "${f#"$ROOT"/}" "$(sha256_of "$f")"
+	done | sha256_stdin
+}
+
+# 「这行结论算不算本轮已 PASS」——跳过判据**只此一处**，主循环和 --selftest 共用。
+# 各写一份迟早在列号上漂移，而漂移的后果正是这个脚本要修的毛病：看着全绿。
+already_passed() {
+	awk -F'\t' -v p="$1" -v fp="$FP" \
+		'$1==p && $2=="PASS" && $5==fp{found=1} END{exit !found}' "$RESULTS"
+}
+
+# 判据的自检。不带 --selftest 就是死代码，所以顺带把它变成「换设备前先跑这个」的入口。
+selftest() {
+	tmp=$(mktemp -d) || exit 1
+	FP=thisfingeprint
+	RESULTS="$tmp/r.tsv"
+	printf 'package\tstatus\tseconds\tskips\ttoolchain\n' >"$RESULTS"
+	printf 'a\tPASS\t1\t-\t%s\n' "$FP"      >>"$RESULTS"   # 本轮已 PASS   → 跳过
+	printf 'b\tPASS\t1\t-\tdeadbeef\n'      >>"$RESULTS"   # 别的树的 PASS → 不跳过
+	printf 'c\tPASS\t1\t-\n'                >>"$RESULTS"   # 旧格式无指纹  → 不跳过
+	printf 'd\tFAIL\t1\t-\t%s\n' "$FP"      >>"$RESULTS"   # 本轮但是 FAIL → 不跳过
+	printf 'e\tPASS\t1\t-\t%s\n' "$FP"      >>"$RESULTS"   # 本轮已 PASS   → 跳过
+	rc=0
+	for c in a:yes b:no c:no d:no e:yes zz:no; do
+		p=${c%%:*}; want=${c##*:}
+		if already_passed "$p"; then got=yes; else got=no; fi
+		if [ "$got" != "$want" ]; then
+			echo "selftest: $p 期望 $want，实际 $got" >&2
+			rc=1
+		fi
+	done
+	# 指纹必须覆盖整棵 bin/，不能只认 bin/go：2026-09-23 实测到两棵树 bin/go 逐字节相同、
+	# 而 go_openharmony_arm64_exec 不同（一个嵌着构建机绝对路径），只认 bin/go 就会把
+	# 「在 A 树跑绿」的结论用到 B 树上。下面第三例就是那天那个形状。
+	mkdir -p "$tmp/root/bin"
+	ROOT="$tmp/root"
+	printf a >"$ROOT/bin/go"
+	printf b >"$ROOT/bin/go_openharmony_arm64_exec"
+	fp1=$(tree_fingerprint)
+	[ "$fp1" = "$(tree_fingerprint)" ] || { echo "selftest: 同一棵树两次指纹不同" >&2; rc=1; }
+	printf bb >"$ROOT/bin/go_openharmony_arm64_exec"
+	fp2=$(tree_fingerprint)
+	[ "$fp1" != "$fp2" ] || { echo "selftest: 只改了 go_*_exec 指纹却没变 —— 指纹没覆盖整棵 bin/" >&2; rc=1; }
+	printf c >"$ROOT/bin/gofmt"
+	[ "$fp2" != "$(tree_fingerprint)" ] || { echo "selftest: 多一个文件指纹却没变" >&2; rc=1; }
+	# 包装跑一次设备测试就会在 bin/ 下长出目标工具链缓存；指纹必须对此免疫，
+	# 否则断点续跑的每一轮都算出新指纹、把上一轮的 PASS 全作废。
+	fp3=$(tree_fingerprint)
+	mkdir -p "$ROOT/bin/openharmony_arm64" && printf d >"$ROOT/bin/openharmony_arm64/compile"
+	[ "$fp3" = "$(tree_fingerprint)" ] || { echo "selftest: bin/ 子目录（目标工具链缓存）影响了指纹 —— 续跑会失效" >&2; rc=1; }
+
+	rm -rf "$tmp"
+	[ "$rc" = 0 ] && echo "selftest: ok（6 例判据 + 4 例指纹）"
+	return "$rc"
 }
 
 while [ $# -gt 0 ]; do
@@ -62,6 +162,8 @@ while [ $# -gt 0 ]; do
 	--long)     SHORT= ;;   # 不加 -short：仅当 guest 内存足够时用
 	-l|--list)  LIST_ONLY=1 ;;
 	-f|--force) FORCE=1 ;;
+	--toolchain) ROOT=$2; EXTERNAL=1; shift ;;
+	--selftest) SELFTEST=1 ;;
 	-v)         VERBOSE=-v ;;
 	-o)         OUT=$2; shift ;;
 	-t)         HOST_TIMEOUT=$2; shift ;;
@@ -74,16 +176,26 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
+SRC="$ROOT/src"
+GOTOOL="$ROOT/bin/go"
+
 [ -x "$GOTOOL" ] || die "$GOTOOL 不存在 —— 先按 CLAUDE.md 跑一次 ./make.bash"
+[ -d "$SRC" ] || die "$SRC 不存在 —— ${ROOT} 不像一棵 Go 树"
+
+if [ "$SELFTEST" = 1 ]; then
+	selftest
+	exit $?
+fi
 
 # 旧工具链污染测量本轮已经中过一次（见 docs §9），所以每次都验一下再跑。
-if [ "$SRC/internal/platform/supported.go" -nt "$GOTOOL" ]; then
+# 交付物里的 mtime 是冻结时刻的相对关系，这条判据在那儿没有意义（会假报）。
+if [ "$EXTERNAL" = 0 ] && [ "$SRC/internal/platform/supported.go" -nt "$GOTOOL" ]; then
 	echo "warning: bin/go 比 src/internal/platform/supported.go 旧，可能不含最新的平台改动" >&2
 fi
 
 export GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1
 export CC="$OHOS_SDK/native/llvm/bin/clang --target=aarch64-linux-ohos --sysroot=$OHOS_SDK/native/sysroot -D__MUSL__"
-export PATH="$REPO/bin:$PATH"
+export PATH="$ROOT/bin:$PATH"
 export OHOS_TARGET
 
 # 设备先探活。不探的话设备挂掉时整轮 262 个有测试的包全变 WRAPPER —— 分类是对的，但白刷一
@@ -145,10 +257,17 @@ fi
 
 mkdir -p "$OUT/logs"
 RESULTS="$OUT/results.tsv"
-[ -f "$RESULTS" ] || printf 'package\tstatus\tseconds\tskips\n' >"$RESULTS"
+[ -f "$RESULTS" ] || printf 'package\tstatus\tseconds\tskips\ttoolchain\n' >"$RESULTS"
 MARK="$OUT/.timed-out"
 
+FP=$(tree_fingerprint)
+if ! head -1 "$RESULTS" | grep -q toolchain; then
+	echo "==> 注意：${RESULTS} 是旧格式（无 toolchain 列），里面的结论来源不明，本轮全部重跑"
+fi
+
 echo "==> 工具链 $("$GOTOOL" version)"
+echo "==> 被测树 ${ROOT}$([ "$EXTERNAL" = 1 ] && echo "（交付物，非本仓库）")"
+echo "==> 指纹 ${FP:0:12}（整棵 bin/ 的 sha256）—— 结果按它记账，换树即失效"
 # 变量一律加花括号：bash 3.2（macOS 自带）会把紧跟 `$VAR` 的多字节字符当成变量名
 # 的一部分，`$OHOS_TARGET，` 会报 "unbound variable"。这里全是中文，必踩。
 echo "==> 目标 ${OHOS_TARGET}，${#PKGS[@]} 个包，主机墙钟 ${HOST_TIMEOUT}s（设备侧 -timeout ${DEV_TIMEOUT}s）"
@@ -161,10 +280,9 @@ FAILED_PKGS=()
 # —— 包装会抱着 flock 变成孤儿，后面每个包都卡在 lock() 上。
 set -m
 for pkg in "${PKGS[@]}"; do
-	if [ "$FORCE" = 0 ] && awk -F'\t' -v p="$pkg" \
-		'$1==p && $2=="PASS"{found=1} END{exit !found}' "$RESULTS"; then
+	if [ "$FORCE" = 0 ] && already_passed "$pkg"; then
 		skipped=$((skipped+1))
-		printf '  %-30s (already passed)\n' "$pkg"
+		printf '  %-30s (already passed on this tree)\n' "$pkg"
 		continue
 	fi
 
@@ -215,7 +333,7 @@ for pkg in "${PKGS[@]}"; do
 		skips=$(grep -c -- '--- SKIP' "$log" 2>/dev/null || true)
 		[ -n "$skips" ] || skips=0
 	fi
-	printf '%s\t%s\t%s\t%s\n' "$pkg" "$status" "$elapsed" "$skips" >>"$RESULTS"
+	printf '%s\t%s\t%s\t%s\t%s\n' "$pkg" "$status" "$elapsed" "$skips" "$FP" >>"$RESULTS"
 
 	case $status in
 	PASS)
@@ -235,6 +353,7 @@ if [ ${#FAILED_PKGS[@]} -gt 0 ]; then
 	echo "==> 要看日志的包："
 	printf '    %s\n' "${FAILED_PKGS[@]}"
 fi
-echo "==> 续跑：再跑一次本脚本即可，已 PASS 会跳过；要重跑加 --force"
+echo "==> 本轮树指纹 ${FP:0:12}（${ROOT}）"
+echo "==> 续跑：再跑一次本脚本即可，同一棵树上的 PASS 会跳过；要重跑加 --force"
 
 [ "$failed" = 0 ] && [ "$timedout" = 0 ] && [ "$wrapped" = 0 ]

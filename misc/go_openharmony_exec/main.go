@@ -361,12 +361,30 @@ func fingerprintTree(h hash.Hash, dir string) error {
 	})
 }
 
-// findGoroot locates the host GOROOT. runtime.GOROOT() is empty when the wrapper
-// was built with -trimpath, in which case the go on PATH is the only remaining
-// authority on where the tree is.
+// findGoroot locates the host GOROOT.
+//
+// The wrapper's own location answers first: dist installs it at
+// $GOROOT/bin/go_<goos>_<goarch>_exec, which is the same rule bin/go uses and
+// the reason an unpacked tarball is relocatable at all. runtime.GOROOT() is
+// only a fallback, because it is the path baked in at build time -- right for
+// the tree it was built in, wrong the moment that tree is shipped to someone
+// else, which is the case this wrapper exists to serve.
+//
+// Upstream's go_android_exec asks runtime.GOROOT() first and gets away with it:
+// releases are built with -trimpath, so that answer is empty and the 'go env'
+// fallback is what actually runs. This wrapper was not trimmed, so the baked
+// path won every time -- a tree unpacked anywhere but the builder's directory
+// then quietly got the wrong GOROOT (sync mirrored the baked path, or nothing,
+// when it did not exist at all) and every test reading ../../testdata or
+// ../../lib/time/zoneinfo.zip failed with ENOENT rather than being reported as
+// a harness gap. runtime.GOROOT() is not consulted at all here: the toolchain
+// deprecates it for this exact reason ("the root used during the Go build will
+// not be meaningful if the binary is copied to another machine").
 func findGoroot() (string, error) {
-	if p := runtime.GOROOT(); p != "" {
-		return p, nil
+	if exe, err := os.Executable(); err == nil {
+		if root, ok := gorootFromExecutable(exe); ok {
+			return root, nil
+		}
 	}
 	out, err := exec.Command("go", "env", "GOROOT").Output()
 	if err != nil {
@@ -377,6 +395,31 @@ func findGoroot() (string, error) {
 		return "", fmt.Errorf("cannot locate GOROOT")
 	}
 	return p, nil
+}
+
+// gorootFromExecutable is the GOROOT implied by the wrapper's own path, which is
+// $GOROOT/bin/go_<goos>_<goarch>_exec. Split out from findGoroot because it is
+// the decision that was wrong -- see the comment there -- and a decision that
+// already shipped broken once is worth a test that does not need a device.
+func gorootFromExecutable(exe string) (string, bool) {
+	root := filepath.Dir(filepath.Dir(exe))
+	return root, isGoroot(root)
+}
+
+// isGoroot reports whether dir is the root of a Go tree.
+//
+// src and VERSION are the pair to check: they are the entries mirrorEntries
+// treats as the minimum, and VERSION is the one that tells a real tree from a
+// directory that merely happens to contain a src/. A false positive here would
+// point the mirror above the tree instead of at it -- worse than no answer,
+// because it looks like one.
+func isGoroot(dir string) bool {
+	for _, entry := range []string{"src", "VERSION"} {
+		if _, err := os.Stat(filepath.Join(dir, entry)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // targetPlatform is the platform being tested, which is what names the
