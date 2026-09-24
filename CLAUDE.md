@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A fork of the Go toolchain (`golang/go`) that adds **OpenHarmony (OHOS)** as a supported platform. It is a full Go source tree, not a Go module. `VERSION` tracks the upstream release it is based on (currently `go1.26.5`).
 
 Branches:
-- `release-branch.go1.26` — the active OHOS tree (upstream go1.26.5 + OHOS delta)
-- `ohos-1.24-base` — the previous generation (upstream go1.24.5 + OHOS delta), kept as the source of the authoritative delta
-- `main` — vintage OHOS tree with **no common history** with the other two; PRs from a dev branch into `main` need a synthetic merge commit (see the upgrade guide §8.2)
+- `main` — the default branch and active OHOS tree (upstream go1.27.1 + OHOS delta); development happens here (since 2026-09-25)
+- `ohos-1.27-base` — the go1.27 development branch; now equal to `main` and kept as history (v1.27.1-beta1/beta2/ohos were cut from it)
+- `release-branch.go1.26` — the previous generation (upstream go1.26.5 + OHOS delta), kept as the source of the authoritative delta
 
 ## Commands
 

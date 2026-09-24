@@ -11,9 +11,9 @@ name: ohos
 
 on:
   push:
-    branches: ['ohos-*']
+    branches: ['main', 'ohos-*']
   pull_request:
-    branches: ['ohos-*']
+    branches: ['main', 'ohos-*']
   schedule:
     # 每天一遍全量 A 层。整点会挤，挑 :23。
     - cron: '23 3 * * *'
