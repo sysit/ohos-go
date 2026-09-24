@@ -98,6 +98,11 @@ sha256_stdin() {
 # 把子目录算进去的话指纹会在**跑的过程中**变，于是每次断点续跑都算出新指纹、把上一轮的
 # PASS 全部作废、从零重跑 —— 正好把这个脚本存在的理由（可中断可续跑）废掉。
 # 顶层文件恰好就是会发出去的那几个（go、gofmt、两个 _exec 包装），也就是该被钉住的东西。
+#
+# **已知天花板**：`pkg/tool/<host>/{compile,link,asm,cgo}` 同样是「编译器」，但不在指纹里。
+# 只换了它们而 `bin/go` 逐字节不变的话指纹不动，续跑会拿旧行当结论。没去覆盖是因为加一处
+# 就等于本轮 results.tsv 整份作废、B 层从零重跑；而两者同树同批构建，实际总是 `bin/go`
+# 先变。真要不放心，按 guide §6.8 那条比这几个的 sha256。
 tree_fingerprint() {
 	find "$ROOT/bin" -maxdepth 1 -type f | LC_ALL=C sort | while read -r f; do
 		printf '%s %s\n' "${f#"$ROOT"/}" "$(sha256_of "$f")"
@@ -197,6 +202,18 @@ export GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1
 export CC="$OHOS_SDK/native/llvm/bin/clang --target=aarch64-linux-ohos --sysroot=$OHOS_SDK/native/sysroot -D__MUSL__"
 export PATH="$ROOT/bin:$PATH"
 export OHOS_TARGET
+
+# SDK 缺席的话上面那条 CC 指向一个不存在的 clang，**每一个 cgo 包都 FAIL** ——
+# 而 FAIL 的形状和 port 缺陷一模一样（`net`、`os/user`、`crypto/x509` 全红）。这个脚本
+# 存在的理由就是「别把环境问题看成 port 问题」，所以在这儿硬停，而不是等 262 行之后去分辨。
+#
+# **这条必须排在下面那次设备探活之前。** 238 那台既没 SDK 也没有 hdc，先探设备就会死在
+# 「模拟器不可达」上 —— 那条提示会把人支去重启一台永远不会跑 B 的机器的模拟器。
+if [ ! -x "$OHOS_SDK/native/llvm/bin/clang" ]; then
+	echo "error: OHOS_SDK 里没有 clang: $OHOS_SDK/native/llvm/bin/clang" >&2
+	echo "       OHOS_SDK 现在指向 '$OHOS_SDK'；这台机器没有 SDK 就跑不了 B 层" >&2
+	exit 2
+fi
 
 # 设备先探活。不探的话设备挂掉时整轮 262 个有测试的包全变 WRAPPER —— 分类是对的，但白刷一
 # 轮、还把 results.tsv 灌满噪音（2026-09-21 真发生过：模拟器空转 474% CPU 不自愈）。

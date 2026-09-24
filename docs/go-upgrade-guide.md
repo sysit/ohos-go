@@ -514,6 +514,13 @@ cd ~ && tar czf /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
 `CLAUDE.md`、`resume.sh` 这些开发脚手架，**必须自己排**；且目录名是 `ohos-go` 不是
 `go1.27.1-ohos`，要用 GNU tar 的 `--transform` 改成员名（BSD tar 无此参数）：
 
+> **这条配方只负责打包，不负责装 `_exec` 包装**（2026-09-24 补）：那一步在 Linux 上必须
+> 先在源树里做一遍，§6.7 的后半段照抄即可（`../bin/go build -trimpath -o ../bin/go_openharmony_arm64_exec
+> ./go_openharmony_exec`，再 `cp` 成 `_amd64_exec`）。**少了它包照样能编能跑** ——
+> 两个 Go 二进制、`pkg/tool` 全都正常，只是下游的 `go test` 再也不会落到设备上，
+> 失败方式是完全静默的。两份已发的 Linux 资产都带这 2 个成员（实测），
+> 原因是打它们的那棵树先前已经装过；**换一棵新树就会漏**。验收清单第 3 条就是查它。
+
 ```bash
 # 这台没有 / 上的空间，tar 落到 /opt（同一台机器上 df 挑大的那个盘）
 cd /root/ohos-go && tar czf /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
@@ -539,18 +546,34 @@ cd /root/ohos-go && tar czf /opt/go1.27.1-ohos-beta2-linux-amd64.tar.gz \
   那只是 `-buildmode=shared` 能力测试的宿主产物，本树里根本没有（`pkg/` 只有 `include` 与 `tool`）。
 - **包体约 70 MiB，条目约 17.5k。** 明显更大就是排漏了，**而且要先看字节数、别先看条目数** ——
   目标架构工具链缓存那 200 MB 只对应三十几条条目，`wc -l` 完全看不出来。
+  `v1.27.1-ohos-darwin-arm64` 实测 69 MiB / 17466 条（`v1.27.1-beta2` 是 17463：多出的 3 条
+  就是那轮新增的两个包装测试与一份发布说明）。**这个数只随新增源码文件增长**，
+  所以它是一条粗判据 —— 真正能定性的是字节数那一条。
 
 打完的验收（**这一步不能省，它验的是「交出去的那个文件」而不是「你本地那棵树」**）：
 
 ```bash
 F=<tarball>
-tar tzf $F | grep -E 'ohos-test-results|\.DS_Store|\.hvigor|resume\.sh'   # 必须为空
-tar tzf $F | wc -l                                        # ≈17400，暴增说明排漏了
+# 1. 成员名。词汇表要和打包命令里的 --exclude 对齐 —— 只写几个显眼的词，
+#    「必须为空」证明的只是那几个词没进包，不是排干净了。
+tar tzf $F | grep -E 'ohos-test-results|\.DS_Store|\.hvigor|resume\.sh|^[^/]+/\.git/|local\.properties|/entry/build/'  # 必须为空
+tar tzf $F | wc -l                                        # ≈17470（只随新增源码文件增长）；暴增说明排漏了
+# 2. 字节数。这才是看得见「目标架构工具链缓存」的那把尺（见本节开头）。
+ls -lh $F                                                 # 69M；明显更大就是排漏了
+# 3. 两个 _exec 包装必须在包里。少了它们包仍能编能跑，只是下游的 go test
+#    再也不会落到设备上 —— 失败方式是完全静默的。
+tar tzf $F | grep -c 'go_openharmony_.*_exec$'            # 必须是 2
 mkdir -p /tmp/accept && tar xzf $F -C /tmp/accept
 A=/tmp/accept/go1.27.1-ohos
 $A/bin/go version                                         # 必须带 -ohos
-strings $A/bin/go | grep -c "$(pwd)"                      # 必须为 0（release 标志在）
+# 4. 整棵 bin/ 里没有构建机路径。判据是路径无关那条（§6.7 已否掉 grep "$(pwd)"：
+#    解包到别处之后它恒为 0），且要遍历整个 bin/ —— 只查 bin/go 会漏掉手装的包装。
+for f in $A/bin/*; do [ -f "$f" ] || continue
+  printf '%6s  %s\n' "$(strings "$f" | grep -cE '^/[^ ]*\.go$')" "$f"
+done        # 每一行都必须是 0
 $A/bin/go tool dist list | grep openharmony               # 两个目标都在
+# 5. 摘要要真跑一次 -c。相对名的摘要在别的目录里连文件都找不到，会静默地「没验」。
+(cd "$(dirname $F)" && shasum -a 256 -c "$(basename $F).sha256")   # 必须 OK
 ```
 
 **再解出一棵新树、用它编一个产物**（只跑 `go version` 会漏掉「`pkg/tool` 没打进去」这类缺陷）：

@@ -52,7 +52,12 @@ const (
 	deviceGoroot = deviceRoot + "/goroot"
 	deviceGoWork = deviceRoot + "/gowork"
 	exitStr      = "__EXIT__"
-	lockFile     = "go_openharmony_exec.lock"
+	// syncOK is echoed by the device only once every archive has arrived and
+	// been extracted. hdc reports its own failures as "[Fail]" on stdout but has
+	// nothing at all to say about the remote shell's, so this marker is the only
+	// evidence that reaches the host that the device tree is the host's.
+	syncOK   = "__SYNC_OK__"
+	lockFile = "go_openharmony_exec.lock"
 	// syncStatusFile records the GOROOT revision already pushed. It lives on the
 	// host, not the device, so that a tree edited on the host is re-pushed
 	// rather than silently tested in its old form. The target is part of the
@@ -108,9 +113,16 @@ func runMain() int {
 	// Before anything is pushed, make sure the device has the tree the tests
 	// read from and the toolchain they exec. Best effort: a host with no GOROOT
 	// (a -trimpath build) still runs everything that does not need one.
-	hostGoroot, err := syncGoroot(hdcPath, target)
+	goos, goarch := targetPlatform()
+	hostGoroot, err := syncGoroot(hdcPath, target, goos, goarch)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go_openharmony_exec: goroot sync: %v\n", err)
+		// A degradation, not a failure: the run continues without a device
+		// tree. Gated like every other notice, because the alternative is a
+		// passing run turned into a failing one by a line we added -- see
+		// noteToHuman.
+		if noteToHuman(os.Stderr) {
+			fmt.Fprintf(os.Stderr, "go_openharmony_exec: goroot sync: %v\n", err)
+		}
 	}
 
 	// Unique per process: two builds of the same package (different modules)
@@ -118,16 +130,16 @@ func runMain() int {
 	work := fmt.Sprintf("%s/%s-%d", deviceRoot, path.Base(bin), os.Getpid())
 	// mkdir -p creates deviceRoot too, and work must exist before the binary is
 	// pushed into it: hdc does not create missing parents.
-	if err := hdc(hdcPath, target, "shell", "mkdir -p "+path.Join(work, "tmp")); err != nil {
+	if err := hdc(hdcPath, target, "shell", "mkdir -p "+shellQuote(path.Join(work, "tmp"))); err != nil {
 		return fail("mkdir", err)
 	}
-	defer hdc(hdcPath, target, "shell", "rm -rf "+work)
+	defer hdc(hdcPath, target, "shell", "rm -rf "+shellQuote(work))
 
 	remote := path.Join(work, path.Base(bin))
 	if err := hdc(hdcPath, target, "file", "send", bin, remote); err != nil {
 		return fail("push", err)
 	}
-	if err := hdc(hdcPath, target, "shell", "chmod +x "+remote); err != nil {
+	if err := hdc(hdcPath, target, "shell", "chmod +x "+shellQuote(remote)); err != nil {
 		return fail("chmod", err)
 	}
 
@@ -139,13 +151,13 @@ func runMain() int {
 	}
 
 	quoted := make([]string, 0, len(os.Args))
-	quoted = append(quoted, remote)
+	quoted = append(quoted, shellQuote(remote))
 	for _, a := range os.Args[2:] {
 		quoted = append(quoted, shellQuote(a))
 	}
 	cmdline := strings.Join(quoted, " ")
 	if deviceCwd != "" {
-		cmdline = "cd " + deviceCwd + " && " + cmdline
+		cmdline = cdGuard(deviceCwd) + cmdline
 	}
 	cmdline = deviceEnv(hostGoroot, work) + cmdline
 
@@ -161,6 +173,45 @@ func fail(what string, err error) int {
 	// 125 marks "the wrapper itself failed", as in go_android_exec, so it stays
 	// distinguishable from a test binary that exited non-zero.
 	return 125
+}
+
+// noteToHuman reports whether a line about the wrapper itself may be written to
+// f: only when a human is there to read it.
+//
+// The wrapper's streams belong to the program it proxies, and callers compare
+// them. cmd/internal/testdir points the test binary's stdout and stderr at one
+// buffer (testdir_test.go:645), so a routine notice here fails whichever test
+// happened to run first; runtests.sh:320 likewise reads a bare "go_openharmony_exec:"
+// line as a wrapper failure. Both only bite on a fresh unpack -- where the
+// device toolchain is not built yet there is nothing to announce -- which is
+// exactly the tree a user downloads.
+//
+// The line is between a notice and a failure, not between advice and errors.
+// fail() (which returns 125) writes unconditionally: the run is already lost,
+// and the extra line can only make a confusing failure clearer. A *notice* has
+// the opposite power -- it manufactures a failure out of a run that would
+// otherwise have passed -- so it goes through here, including the ones that
+// report a degraded run, because a degraded run has not failed. The cost is
+// that a degradation is invisible under `go test`; run the wrapper directly
+// when diagnosing one. See docs/ohos-toolchain-install.md.
+func noteToHuman(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// cdGuard is the shell prefix that changes into dir, or abandons the run.
+//
+// A bare "cd dir && cmd" turns a missing device directory into a *test* failure:
+// the && short-circuits, the echo that reads $? records the cd's status as the
+// program's, and a whole layer goes red with no output to explain it. It is
+// reachable -- /data/local/tmp does not survive an emulator restart, while the
+// host-side record of what was pushed does -- and it reads exactly like a port
+// bug. Exiting the shell without a status instead leaves the sentinel unwritten,
+// which run reports as a wrapper failure alongside this line.
+func cdGuard(dir string) string {
+	return "cd " + shellQuote(dir) + " || { echo " +
+		shellQuote("go_openharmony_exec: no such directory on the device: "+dir) +
+		" >&2; exit 125; }; "
 }
 
 // run executes cmdline on the device, forwarding its output to stdout and
@@ -214,7 +265,7 @@ func run(hdcPath, target, cmdline string) (int, error) {
 // that refuses the push leaves the wrapper behaving exactly as it did before
 // the tree existed: mirror the package directory, run, and let the tests that
 // need more skip.
-func syncGoroot(hdcPath, target string) (string, error) {
+func syncGoroot(hdcPath, target, goos, goarch string) (string, error) {
 	goroot, err := findGoroot()
 	if err != nil {
 		return "", err
@@ -230,23 +281,40 @@ func syncGoroot(hdcPath, target string) (string, error) {
 		return goroot, nil
 	}
 
-	goos, goarch := targetPlatform()
 	// A plain make.bash does not cross-build the commands, so the device-native
 	// go may not exist yet. Build it here, once, rather than leave every test
 	// that shells out to 'go build' to skip -- the skip is silent and hides more
 	// cases than any single failure in a run.
+	//
+	// This is the one step here that adds a capability instead of delivering the
+	// tree, so it does not get to fail the sync. It cannot always work:
+	// openharmony/amd64 forces external linking, which wants cgo and a device C
+	// toolchain this build has neither of. Returning early for that would take
+	// the source-tree mirror down with it -- and the mirror is what stops a test
+	// reading ../../testdata from failing with ENOENT and being read as a port
+	// bug. Without a device go those tests skip instead: coverage lost, not
+	// credibility.
 	targetBin := filepath.Join(goroot, "bin", goos+"_"+goarch)
-	if _, err := os.Stat(targetBin); err != nil {
-		fmt.Fprintf(os.Stderr, "go_openharmony_exec: building the %s/%s toolchain (one time)\n", goos, goarch)
+	// The liveness check is the go binary, not the directory: `go install cmd`
+	// creates the directory first, so a build cut short leaves one that answers
+	// "the toolchain is here" for a toolchain that is not.
+	if _, err := os.Stat(filepath.Join(targetBin, "go")); err != nil {
+		if noteToHuman(os.Stderr) {
+			fmt.Fprintf(os.Stderr, "go_openharmony_exec: building the %s/%s toolchain (one time)\n", goos, goarch)
+		}
 		cmd := exec.Command(filepath.Join(goroot, "bin", "go"), "install", "cmd")
 		cmd.Dir = filepath.Join(goroot, "src")
 		// CGO_ENABLED=0 because the device has no C toolchain to link against,
 		// and a pure-Go go command is all the tests need it for.
 		cmd.Env = append(os.Environ(),
 			"GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0", "GOTOOLCHAIN=local", "GOFLAGS=", "GOPROXY=off")
-		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("go install cmd: %w", err)
+		if out, err := cmdOutput(cmd); err != nil {
+			if noteToHuman(os.Stderr) {
+				fmt.Fprintf(os.Stderr, "go_openharmony_exec: no %s/%s device toolchain (%v): %s\n"+
+					"go_openharmony_exec: only the source tree will be pushed; tests that build on the device will skip\n",
+					goos, goarch, err, firstLine(out))
+			}
+			targetBin = ""
 		}
 	}
 
@@ -254,14 +322,24 @@ func syncGoroot(hdcPath, target string) (string, error) {
 	// the mirror entries at the GOROOT root, the commands in bin so that PATH
 	// finds them, the compiler in pkg/tool/<goos>_<goarch> where go looks for
 	// it, and pkg/include for the assembler's #includes.
-	archives := []struct {
-		name   string
-		tarSrc []string // arguments after "tar czf <file>"
-		into   string   // device directory to extract into
-	}{
+	archives := []archive{
 		{"goroot", append([]string{"-C", goroot}, mirrorEntries(goroot)...), deviceGoroot},
-		{"bin", []string{"-C", targetBin, "."}, path.Join(deviceGoroot, "bin")},
-		{"pkg", []string{"-C", filepath.Join(goroot, "pkg"), "include", path.Join("tool", goos+"_"+goarch)}, path.Join(deviceGoroot, "pkg")},
+	}
+	// The device toolchain rides along only if it is there. pkg goes with it:
+	// pkg/include exists for the device's assembler, which without a device go
+	// is never run.
+	if targetBin != "" {
+		archives = append(archives,
+			archive{"bin", []string{"-C", targetBin, "."}, path.Join(deviceGoroot, "bin")},
+			archive{"pkg", []string{"-C", filepath.Join(goroot, "pkg"), "include", path.Join("tool", goos+"_"+goarch)}, path.Join(deviceGoroot, "pkg")},
+		)
+	}
+
+	// The remote names are decided up front, before anything is sent, so that
+	// the script below and the sends cannot disagree about them.
+	remote := make([]string, len(archives))
+	for i, a := range archives {
+		remote[i] = path.Join(deviceRoot, "sync-"+a.name+".tgz")
 	}
 
 	if err := hdc(hdcPath, target, "shell", "mkdir -p "+deviceRoot); err != nil {
@@ -273,34 +351,67 @@ func syncGoroot(hdcPath, target string) (string, error) {
 	}
 	defer os.RemoveAll(tmp)
 
-	// Extract in one shell, after every archive has arrived: a partial tree is
-	// worse than none, since it makes the tests that read it fail rather than
-	// skip.
-	script := "rm -rf " + deviceGoroot + " " + deviceGoWork +
-		"; mkdir -p " + deviceGoroot + "/bin " + deviceGoroot + "/pkg" +
-		" " + deviceGoWork + "/gocache " + deviceGoWork + "/gopath " + deviceGoWork + "/home"
-	var remote []string
-	for _, a := range archives {
+	for i, a := range archives {
 		local := filepath.Join(tmp, a.name+".tgz")
 		tarCmd := exec.Command("tar", append([]string{"czf", local}, a.tarSrc...)...)
-		tarCmd.Stderr = os.Stderr
-		if err := tarCmd.Run(); err != nil {
-			return "", fmt.Errorf("tar %s: %w", a.name, err)
+		if out, err := cmdOutput(tarCmd); err != nil {
+			return "", fmt.Errorf("tar %s: %w: %s", a.name, err, firstLine(out))
 		}
-		remote = append(remote, path.Join(deviceRoot, "sync-"+a.name+".tgz"))
-		if err := hdc(hdcPath, target, "file", "send", local, remote[len(remote)-1]); err != nil {
+		if err := hdc(hdcPath, target, "file", "send", local, remote[i]); err != nil {
 			return "", err
 		}
-		script += "; tar xzf " + remote[len(remote)-1] + " -C " + a.into
 	}
-	if err := hdc(hdcPath, target, "shell", script+"; rm -f "+strings.Join(remote, " ")); err != nil {
+
+	// The status file is written only on the evidence of the marker, and it is
+	// what makes the next run skip the whole three-minute copy. Recording an
+	// extract that did not finish would leave the device with a partial tree
+	// that no later run ever repairs.
+	out, err := hdcOut(hdcPath, target, "shell", syncScript(archives, remote))
+	if err != nil {
 		return "", err
+	}
+	if !strings.Contains(out, syncOK) {
+		detail := firstLine(out)
+		if detail == "" {
+			detail = "(the device said nothing)"
+		}
+		return "", fmt.Errorf("device extract did not finish; expected %s: %s", syncOK, detail)
 	}
 
 	if err := os.WriteFile(statusPath, []byte(want), 0600); err != nil {
 		return "", err
 	}
 	return goroot, nil
+}
+
+// archive is one tarball to send and the device directory to extract it into.
+type archive struct {
+	name   string
+	tarSrc []string // arguments after "tar czf <file>"
+	into   string   // device directory to extract into
+}
+
+// syncScript is the device shell that unpacks the archives.
+//
+// Both details of its shape are load-bearing. The chain is && so that a tar
+// failing part way stops the rest: the point of the sync is that the device tree
+// is the host's, and a half-extracted tree is the one outcome that makes a test
+// read a stale file -- a wrong answer rather than a missing one. And the marker
+// is echoed only if the whole chain succeeded: hdc says nothing about the remote
+// shell's exit status, so without it the host would take a failed extract for a
+// current device tree and never retry.
+//
+// rm -f follows the marker after a ; rather than an &&, because it has to happen
+// either way. The tarballs are hundreds of megabytes and the next run sends them
+// again.
+func syncScript(archives []archive, remote []string) string {
+	script := "rm -rf " + deviceGoroot + " " + deviceGoWork +
+		" && mkdir -p " + deviceGoroot + "/bin " + deviceGoroot + "/pkg" +
+		" " + deviceGoWork + "/gocache " + deviceGoWork + "/gopath " + deviceGoWork + "/home"
+	for i, a := range archives {
+		script += " && tar xzf " + remote[i] + " -C " + a.into
+	}
+	return script + " && echo " + syncOK + "; rm -f " + strings.Join(remote, " ")
 }
 
 // gorootFingerprint identifies the pushed tree well enough to notice an edit.
@@ -453,7 +564,10 @@ func deviceEnv(hostGoroot, work string) string {
 	}
 	env := "export GOROOT=" + deviceGoroot +
 		"; export PATH=" + deviceGoroot + "/bin:$PATH" +
-		"; export TMPDIR=" + path.Join(work, "tmp") +
+		// Quoted because it is built from the test binary's name, and the
+		// constants above are not: deviceGoroot and deviceGoWork cannot contain
+		// a space, and every path that can goes through shellQuote.
+		"; export TMPDIR=" + shellQuote(path.Join(work, "tmp")) +
 		"; export GOCACHE=" + deviceGoWork + "/gocache" +
 		"; export GOPATH=" + deviceGoWork + "/gopath" +
 		"; export HOME=" + deviceGoWork + "/home" +
@@ -540,7 +654,11 @@ func pushSourceTree(hdcPath, target, work string) (string, error) {
 		return "", nil
 	}
 	deviceCwd := path.Join(work, "cwd", filepath.ToSlash(cwd))
-	if err := hdc(hdcPath, target, "shell", "mkdir -p "+path.Dir(deviceCwd)); err != nil {
+	// The host working directory is the one path here a user chooses, so it is
+	// the one that arrives with a space in it. Unquoted, "mkdir -p /a/My
+	// Projects" makes two directories and the copy lands beside the mirror
+	// instead of in it.
+	if err := hdc(hdcPath, target, "shell", "mkdir -p "+shellQuote(path.Dir(deviceCwd))); err != nil {
 		return "", err
 	}
 	if err := hdc(hdcPath, target, "file", "send", cwd, path.Dir(deviceCwd)); err != nil {
@@ -626,17 +744,53 @@ func (f *exitFilter) line(l []byte) {
 // degrades silently into "the test ran but its data was missing" -- exactly the
 // harness defect that is indistinguishable from a port bug.
 func hdc(hdcPath, target string, args ...string) error {
+	_, err := hdcOut(hdcPath, target, args...)
+	return err
+}
+
+// hdcOut is hdc for the one caller that has to read the remote shell's answer,
+// which is the sync: every other call only cares whether the command failed.
+func hdcOut(hdcPath, target string, args ...string) (string, error) {
 	cmd := exec.Command(hdcPath, append(hdcArgs(target), args...)...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
-		return err
+		return "", fmt.Errorf("hdc %s: %w: %s", strings.Join(args, " "), err, firstLine(errOut.String()))
 	}
 	if bytes.Contains(out.Bytes(), []byte("[Fail]")) {
-		return fmt.Errorf("hdc %s: %s", strings.Join(args, " "), strings.TrimSpace(out.String()))
+		return "", fmt.Errorf("hdc %s: %s", strings.Join(args, " "), strings.TrimSpace(out.String()))
 	}
-	return nil
+	return out.String(), nil
+}
+
+// cmdOutput runs a helper command with its output captured rather than
+// forwarded.
+//
+// hdc prints failures on stdout and still exits zero, so the exit status of
+// everything here is only half the story -- but the other half is that none of
+// it belongs on the streams being proxied. cmd/internal/testdir compares the
+// test binary's merged stdout+stderr byte for byte, so a tar or go-install
+// complaint routed to os.Stderr fails whichever test ran first, and the failure
+// points at the test.
+func cmdOutput(cmd *exec.Cmd) (string, error) {
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// firstLine condenses a helper's output into the one line an error or a notice
+// can carry.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
 }
 
 func hdcArgs(target string) []string {

@@ -14,15 +14,22 @@ import (
 )
 
 // TestRunMainPushesSourceTree drives the whole wrapper against a fake hdc and
-// checks the two things a test needs beyond "the binary ran": the package's
-// working directory is mirrored onto the device, and the binary is started from
-// that mirror.
+// checks the three things a test needs beyond "the binary ran": the package's
+// working directory is mirrored onto the device, the binary is started from that
+// mirror, and nothing the wrapper says on its own account reaches the streams it
+// is proxying.
 //
-// Losing either is silent. The wrapper still reports the test's own exit
+// Losing the first two is silent. The wrapper still reports the test's own exit
 // status, so packages whose tests read files next to their sources -- os looks
 // for stat_linux.go in the working directory, io/fs's TestGlob walks it,
 // text/template opens testdata/ -- just fail on device for reasons that have
 // nothing to do with the port.
+//
+// The fake hdc never echoes the sync marker, so this is also the acceptance for
+// the degraded case: a GOROOT sync that fails -- an unwritable GOROOT, a device
+// that refuses the push -- must still leave the package mirror in place.
+// Returning early there would trade a skip for an ENOENT, which is the
+// misdiagnosis the mirror exists to prevent.
 func TestRunMainPushesSourceTree(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "hdc.log")
 	script := "#!/bin/sh\n" +
@@ -62,10 +69,31 @@ func TestRunMainPushesSourceTree(t *testing.T) {
 	os.Args = []string{"go_openharmony_exec", bin, "-test.run=TestX"}
 	defer func() { os.Args = args }()
 
+	// A regular file is what noteToHuman reads as "no human is watching", which
+	// is the same answer it gives under `go test`. The sync below fails, so the
+	// notice it would otherwise print is exactly what must not land here.
+	stderrFile := filepath.Join(t.TempDir(), "stderr")
+	f, err := os.Create(stderrFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	savedStderr := os.Stderr
+	os.Stderr = f
+	// Restored before the deferred Close above runs, and before any t.Fatalf
+	// that would otherwise report into the captured file.
+	defer func() { os.Stderr = savedStderr }()
+
 	// The wrapper's exit status is the remote one, so a push that fails shows
 	// up here as 125 rather than as a pass.
 	if code := runMain(); code != 0 {
 		t.Fatalf("runMain() = %d, want 0", code)
+	}
+
+	if said, err := os.ReadFile(stderrFile); err != nil {
+		t.Fatal(err)
+	} else if len(said) != 0 {
+		t.Errorf("wrapper wrote %d bytes to stderr, want none: %q", len(said), said)
 	}
 
 	logged, err := os.ReadFile(logPath)
@@ -87,7 +115,10 @@ func TestRunMainPushesSourceTree(t *testing.T) {
 	if !strings.Contains(log, "file send "+cwd+" "+path.Dir(deviceCwd)) {
 		t.Errorf("package directory not pushed to device; hdc invocations:\n%s", log)
 	}
-	if !strings.Contains(log, "cd "+deviceCwd+" && ") {
+	// The cd is a guard, not a bare &&: a device directory that the host
+	// believes is current but the device has lost must produce a wrapper
+	// failure (via the missing sentinel) rather than a fake test exit status.
+	if !strings.Contains(log, "cd "+shellQuote(deviceCwd)+" || ") {
 		t.Errorf("binary not run from the mirrored package directory; hdc invocations:\n%s", log)
 	}
 }
