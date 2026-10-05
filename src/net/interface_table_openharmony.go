@@ -26,11 +26,14 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 		return nil, os.NewSyscallError("_C_getifaddrs", errors.Join(err, errors.New(_C_gai_strerror(_C_int(gerrno)))))
 	}
 
+	defer _C_freeifaddrs(res)
+
 	// create a socket for ioctl syscall
 	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
 		return nil, os.NewSyscallError("Socket", err)
 	}
+	defer syscall.Close(s)
 
 	var ifts []Interface
 	processed := make(map[int]int)
@@ -48,14 +51,15 @@ func interfaceTable(ifindex int) ([]Interface, error) {
 		copy(ifr.Name[:], ift.Name)
 		// retrieve index
 		_, _, ep := syscall.Syscall(syscall.SYS_IOCTL, uintptr(s), syscall.SIOCGIFINDEX, uintptr(unsafe.Pointer(ifr)))
-		if ep == 0 {
-			ift.Index = int(*(*uint32)(unsafe.Pointer(&ifr.Ifru[:4][0])))
-			if _, ok := processed[ift.Index]; ok {
-				continue
-			}
-			if ifindex != 0 && ift.Index != ifindex {
-				continue
-			}
+		if ep != 0 {
+			continue
+		}
+		ift.Index = int(*(*uint32)(unsafe.Pointer(&ifr.Ifru[:4][0])))
+		if _, ok := processed[ift.Index]; ok {
+			continue
+		}
+		if ifindex != 0 && ift.Index != ifindex {
+			continue
 		}
 		// retrieve mtu
 		_, _, ep = syscall.Syscall(syscall.SYS_IOCTL, uintptr(s), syscall.SIOCGIFMTU, uintptr(unsafe.Pointer(ifr)))
@@ -93,11 +97,14 @@ func interfaceAddrTable(ifi *Interface) ([]Addr, error) {
 		return nil, os.NewSyscallError("_C_getifaddrs", errors.Join(err, errors.New(_C_gai_strerror(_C_int(gerrno)))))
 	}
 
+	defer _C_freeifaddrs(res)
+
 	// create a socket for ioctl syscall
 	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
 		return nil, os.NewSyscallError("Socket", err)
 	}
+	defer syscall.Close(s)
 
 	var addrs []Addr
 	for r := res; r != nil; r = *_C_ifa_next(r) {

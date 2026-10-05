@@ -163,6 +163,7 @@ go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 
 |---|---|---|
 | 环回 TCP/UDP 被禁 | `net`(61 FAIL)、`net/http`(3)、`os/exec`(1)、`os` | `listen tcp6 [::1]:0: bind: permission denied`、`dial udp …: setsockopt: permission denied`、`http_test.go:128: GOROOT/src not available`（此条是 SKIP，非 FAIL） |
 | unix socket 被禁 | `net`、`syscall`(2) | `listen unix …/sock: bind: permission denied`、`creds_test.go:55: getsockopt: permission denied`、`TestPassFD: child process: "failed to find unix fd"` |
+| `getifaddrs` 被拒 | `net`(4：`TestInterfaces`、`TestInterfaceAddrs`、`TestInterfaceUnicastAddrs`、`TestInterfaceMulticastAddrs`) | `interface_test.go:54/87/106/133: route ip+net: _C_getifaddrs: permission denied` —— 上游 Linux 走 netlink，openharmony 换成 `getifaddrs`（`interface_table_openharmony.go`）；设备 `sh` 域无此权限，与环回 `bind` 同类，**非 port 缺陷**（应用域未测） |
 | `linkat`/`link` 被拒 | `os`(TestHardLink、TestRootLinkFrom/RenameFrom) | `root.Link("a","destination") = linkat a destination: permission denied; want success` |
 | fifo `open` 被拒 | `os`(TestFIFONonBlockingEOF) | `fifo_test.go:217: Error opening fifo for read: open …/issue-66239-fifo: permission denied` |
 | `prlimit`/rlimit 被拒 | `syscall`(TestPrlimitOtherProcess) | `Failed to get the current nofile limit: permission denied`（**同文件的子测试 `TestPrlimitFileLimit` PASS**，说明测的是权限不是功能） |

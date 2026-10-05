@@ -92,6 +92,10 @@ func _C_getifaddrs(res **_C_struct_ifaddrs) (int, error) {
 	return int(x), err
 }
 
+func _C_freeifaddrs(ifa *_C_struct_ifaddrs) {
+	C.freeifaddrs(ifa)
+}
+
 func _C_ifa_next(ifa *_C_struct_ifaddrs) **_C_struct_ifaddrs  { return &ifa.ifa_next }
 func _C_ifa_addr(ifa *_C_struct_ifaddrs) **_C_struct_sockaddr { return &ifa.ifa_addr }
 func _C_ifa_mask(ifa *_C_struct_ifaddrs) **_C_struct_sockaddr { return &ifa.ifa_netmask }

@@ -560,6 +560,11 @@ func sysSigaction(sig uint32, new, old *sigactiont) {
 		//
 		// QEMU rejects calling sigaction on SIGRTMAX (64).
 		//
+		// OpenHarmony reserves part of the real-time signal range for its own
+		// use; the SDK's signal.h names them MUSL_SIGNAL_* as SIGRTMIN+n.
+		// Signal 43 lies in that reserved range and sigaction on it is
+		// rejected, so ignore 43 as well.
+		//
 		// Just ignore the error in these case. There isn't
 		// anything we can do about it anyhow.
 		if sig != 32 && sig != 33 && sig != 64 && sig != 43 {
