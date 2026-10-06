@@ -1,6 +1,8 @@
-# OHOS Go 工具链升级指南（go1.24.5 → go1.26.5）
+# OHOS Go 工具链升级指南
 
-本文档总结把上游 Go 新版本合并进 OpenHarmony 分支（`ohos-1.24-base`）的完整流程、关键要点、踩过的坑与验证方法。后续升级 Go 版本（如 1.27、1.28）时可直接复用本流程。
+本文档总结把上游 Go 新版本合并进 OpenHarmony 开发分支（`main`）的完整流程、关键要点、踩过的坑与验证方法。
+它最初写于 go1.24.5 → go1.26.5 那一轮（§6 的坑即出自那次合并），此后随 go1.27.1 更新过；
+**§4.2 / §6.7 / §6.8 是当前（go1.27.1）内容**，§6 其余小节保留为历史记录。后续升级（1.27.2、1.28）可直接复用本流程。
 
 ---
 
@@ -8,11 +10,12 @@
 
 | 项 | 值 |
 |---|---|
-| 开发分支 | `ohos-1.24-base`（OHOS go1.24.5 树，基线 `67b6cc417b`） |
-| 上游仓库 | `upstream` = github.com/golang/go |
+| 开发分支 / 主分支 | `main`（默认分支，上游 `go1.27.1` + OHOS delta；2026-09-25 起主干开发已在此，`ohos-1.27-base` 为其祖先保留为历史。「main 与开发分支无共同历史、需 commit-tree 桥接」是早期 vintage 树时的情形，已不适用——见 §8.2） |
+| 上游仓库 | `upstream` = github.com/golang/go（**上游主干叫 `master`，不是 `main`**） |
 | OHOS 参考 | `sig` = gitcode.com/openharmony-sig/ohos_golang_go |
-| 发布仓库 | `origin` = github.com/star4277/ohos-go |
-| 主分支 | `main`（vintage OHOS 树，历史与开发分支无关，需靠 merge 提交桥接） |
+| 发布仓库 | `origin` = github.com/sysit/ohos-go |
+| 上一代发布点 | `star4277/ohos-go`（`v1.24.5` 正式版、`v1.26.5-beta1` 预发布）；本仓库 `main` 是其延续 —— 这两个 tag 都是 `main` 的祖先。**文档里残留的 `star4277` 出处即此**，不是笔误 |
+| 历史分支 | `ohos-1.27-base`（`main` 的祖先）、`release-branch.go1.26`（上一代 OHOS 树，`VERSION` = `go1.26.5`，权威 delta 的来源） |
 
 ### 关键模型
 
@@ -26,7 +29,7 @@
 ## 2. 合并流程总览
 
 ```
-1. 提取 OHOS delta（相对 go1.24.5 基线）
+1. 提取 OHOS delta（相对上一个上游 tag，当前是 go1.27.1）
 2. 拉取上游目标版本 tag
 3. git merge tag（产生冲突）
 4. 分类冲突：
@@ -34,11 +37,11 @@
    b. OHOS 改动文件 → 取 theirs + 重新套用 OHOS hunks
 5. 解决所有冲突并 git add
 6. 清理冲突标记（git grep '<<<<<<< HEAD|>>>>>>>'）
-7. make.bat 自举构建（用官方 go）
+7. `./make.bash` 自举构建（用官方 go）
 8. 修复编译错误
 9. gofmt + go vet + 跑测试
 10. 验证 OHOS 行为保留
-11. 提交 + 推送 + 建 PR（需先 merge main 桥接历史）
+11. 提交 + 推送 `origin/main`（§8；「先 merge main 桥接历史」已不适用）
 ```
 
 ---
@@ -53,13 +56,13 @@
 git diff <上游旧版本基线> <当前OHOS树HEAD> > ohos-delta-vs-旧版本.patch
 ```
 
-delta 保存到临时目录（如 `C:\Users\Administrator\AppData\Local\Temp\opencode\ohos-merge\`），每个混合冲突文件单独存一份 `ohos-<path with /→__>.patch`。
+delta 保存到临时目录（如 `/tmp/ohos-merge/`），每个混合冲突文件单独存一份 `ohos-<path with /→__>.patch`。
 
 ### 3.2 冲突分类
 
 | 类别 | 处理方式 |
 |---|---|
-| 纯上游文件（OHOS 未改） | `git checkout --theirs <file>` 直接取上游 |
+| 纯上游文件（OHOS 未改） | 无需处理 —— 没碰过的文件**根本不会冲突**，合并自动采用上游版本（不用 `checkout --theirs`） |
 | OHOS 修改过的文件 | 取 theirs（上游版本），再手动重新套用 OHOS 专属 hunk |
 | OHOS 新增文件（`rt0_openharmony_*.s` 等） | 保留 |
 
@@ -134,6 +137,10 @@ comm -23 /tmp/up.txt /tmp/local.txt        # 输出必须为空
 | openharmony 平台登记 | `internal/platform/zosarch.go`、`supported.go` |
 | **amd64 强制外链** | `internal/platform/supported.go` 的 `MustLinkExternal`（`case "openharmony": if goarch != "arm64"`）**及 `cmd/dist/build.go` 的引导期副本**。两处必须同时保留 —— `cmd/dist/build_test.go` 的 `TestMustLinkExternal` 逐格比对两者，漏一处就红。丢掉它，amd64 的**每次**默认构建都死在 `cannot handle R_AMD64_TLS_GD ... when linking internally`（见 §4.3） |
 | goos 映射 | `cmd/go/internal/cfg/cfg.go`、`cmd/go/go_test.go` 的 `goos`、cmd/dist |
+| **split identity 生成器** | `internal/goos/gengoos.go`（openharmony 特例）**及其生成的 `zgoos_*.go`** —— 改生成器、别改生成物（`zgoos_openharmony.go` 头注释即写着 generated）。丢了它 `runtime.GOOS` 不再镜像成 `linux`，所有「是不是 Linux」的分支全崩 |
+| `IsOpenharmony` 常量 | `runtime/extern.go` 的 `const IsOpenharmony bool = goos.IsOpenharmony == 1` —— 上表多行都依赖它 |
+| buildmode / TLS 模型 | `cmd/go/internal/work/init.go` 的 `buildModeInit` —— openharmony 走 `-shared`，arm64 与 amd64 都置 TLS 模型 `"GD"`（§4.2 的 PIE 警告就落在这个函数） |
+| 其它 stdlib 替换 | `net/interface_table_openharmony.go` / `interface_table_linux.go` / `cgo_unix_cgo.go`（`getifaddrs` 替 netlink）、`time/zoneinfo_openharmony.go`、`mime/type_openharmony.go` |
 | c-shared 入口 | `runtime/rt0_openharmony_amd64.s`、`rt0_openharmony_arm64.s` |
 | 共享库 GC 数据 | `cmd/link/internal/ld/decodesym.go` 的 `decodetypeGcprogShlibByReloc` |
 | 测试标签 | `testing/benchmark.go` 的 goos 打印、`crash_cgo_test.go` 的 openharmony case |
@@ -203,7 +210,7 @@ cd misc && $GOROOT/bin/go build -o $GOROOT/bin/go_openharmony_arm64_exec ./go_op
 cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
 ```
 
-`$GOROOT/bin` 必须在 `PATH` 上，否则 `go` 的 `pathcache.LookPath("go_openharmony_arm64_exec")`（`cmd/go/internal/work/build.go:902`）找不到它。设备由 `OHOS_HDC` / `OHOS_TARGET` 选（默认 `hdc` 与模拟器 `127.0.0.1:5555`）。
+`$GOROOT/bin` 必须在 `PATH` 上，否则 `go` 的 `pathcache.LookPath("go_openharmony_arm64_exec")`（`cmd/go/internal/work/build.go:909`）找不到它。设备由 `OHOS_HDC` / `OHOS_TARGET` 选（默认 `hdc` 与模拟器 `127.0.0.1:5555`）。
 
 **这一段为何要手装：** `cmd/dist/build.go` 的 `wrapperPathFor` 里 `openharmony` 那条分支与上游 android/ios 逐字同形，只在 `oldgoos != gohostos` 时命中 —— 即只有交叉自举（`GOOS=openharmony GOARCH=arm64 ./make.bash`）才自动装，普通自举下返回空。该分支**未在完整交叉自举中执行过**，但其载荷已按 dist 的原命令单验（`GOOS=darwin GOARCH=arm64 go build -o <tmp> misc/go_openharmony_exec/main.go`，rc=0，产物在宿主上行为正确），残差风险只有那 3 行 `goos` 管道，与 android 一致。
 
@@ -233,7 +240,7 @@ cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
 `ctxt.Tls == "GD" || (isOpenharmony && ctxt.Flag_shared)`，而 openharmony 默认 PIE
 ⇒ cmd/compile 拿到 `-shared`（实测：一轮默认构建里 465 次 compile 调用全带它）
 ⇒ **每次默认构建都为 g 寄存器重载发出 `R_AMD64_TLS_GD`**。内部链接器没有这条重定位的实现
-（`ld/data.go:353` 直接 `log.Fatalf`），只有外部路径有（`amd64/asm.go` 的 `elfreloc1`，
+（`ld/data.go:359` 直接 `log.Fatalf`），只有外部路径有（`amd64/asm.go` 的 `elfreloc1`，
 发 `R_X86_64_GOTPC32_TLSDESC` + `R_X86_64_TLSDESC_CALL`）。
 
 **代价**：amd64 的**纯 Go** 构建也要求 `CGO_ENABLED=1` + SDK clang，否则报
@@ -264,32 +271,28 @@ GD 出现在需要它的地方、LE 出现在安全的地方，**由链接器决
 
 ### 5.1 环境
 
-```powershell
-# 官方 go 作为 bootstrap（GOROOT 指向官方工具链）
-$env:GOROOT = "D:\ProgramFiles\DeveloperToolKit\Golang\go\go"
-$env:PATH   = "$env:GOROOT\bin;" + $env:PATH
-# 在 src 目录执行
-cmd /c "make.bat"
+macOS / Linux 上直接用官方 go 做 bootstrap（`GOROOT_BOOTSTRAP` 指向它）：
+
+```bash
+export GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec   # 本机实测是 go1.26.5；需 >= 1.24.6
+cd src && ./make.bash
 ```
+
+Windows 上对应的是 `make.bat`；本仓库当前的开发/验证宿主是 macOS（打包双宿主见 §6.8），
+不再有 Windows 环节 —— 早期 Windows 环境记录已删除。
 
 ### 5.2 关键陷阱
 
 1. **GOCACHE 必须干净**：换工具链后不清缓存会导致 reloc 枚举错位，链接报
-   `unknown reloc to ... : 105 (RelocType(105))`。务必：
-   ```powershell
-   go clean -cache
-   ```
-   或显式指向全新目录：`$env:GOCACHE = "<全新目录>"`。
-2. **开发目录与发布目录要分别构建**：`D:\Projects\c\ohos-go` 和
-   `D:\ProgramFiles\DeveloperToolKit\Golang\go\versions\ohos-go` 各自跑 make.bat。
+   `unknown reloc to ... : 105 (RelocType(105))`。务必 `go clean -cache`，
+   或显式指向全新目录：`export GOCACHE=/tmp/gocache-fresh`。
+2. **开发目录与发布目录要分别构建**：仓库工作区（`~/projects/ohos-go`）和已装工具链
+   （`~/go1.27.1-ohos`，见 §6.7）各自构建一次；前者是源码树，后者才是下游消费的产物。
 3. **stringer 生成**：改 reloctype 后需用 stringer 重新生成 `reloctype_string.go`。
-   仓库 GOROOT 未构建时 stringer 不可用，需在临时 module 中运行再拷回：
-   ```bash
-   # 临时目录建 module，go get 对应版本 stringer
-   # 用 go:generate 同款参数生成
-   ```
-4. PowerShell 写文件编码陷阱：`Out-File`/`>` 会产生 BOM/CRLF，破坏 gofmt。
-   用 `git checkout --theirs` 或 `[System.IO.File]::WriteAllText`（UTF8 无 BOM + LF）。
+   仓库 GOROOT 未构建时 stringer 不可用，需在临时 module 中 `go install` 对应版本再拷回。
+4. **编辑器/工具写文件的编码**：必须是 UTF-8 无 BOM + LF，否则 gofmt 报奇怪错误。
+   （Windows 时代这条的典型触发者是 PowerShell 的 `Out-File`；现在宿主是 macOS，
+   注意点变成别让工具链链入 CRLF。）
 
 ---
 
@@ -298,7 +301,11 @@ cmd /c "make.bat"
 ### 6.1 arm64 asm7.go case 编号冲突
 
 上游 1.26.5 新增 `case 108`（bti），OHOS 的 TLS_GD 也用了 108 → 编译报 duplicate case。
-解决：把 OHOS 的 TLS_GD 改到空闲编号（109），optab 和 asmout 两处都要改。
+解决：把 OHOS 的 TLS_GD 改到空闲编号，`optab` 和 `asmout` 两处都要改。
+
+**编号是会变的**：1.26.5 那轮落到 **109**，1.27.1 上游又占了这个号，本轮再挪到 **101** ——
+当前树里的值是 101（`src/cmd/internal/obj/arm64/asm7.go` 的 `optab`）。
+别照抄历史数字，以 `grep C_TLS_GD` 的结果为准。
 
 ### 6.2 getGodebugEarly 返回签名变化
 
@@ -330,8 +337,8 @@ OHOS 在 `go_test.go` 定义了 `goos`（= "openharmony" when IsOpenharmony）�
 
 ### 6.6 发布目录缺工具链
 
-`versions\ohos-go`（合并后的 main）只有源码，没有 `pkg/` 编译产物，`bin/` 下没有 go.exe。
-直接用它会报错。必须先 `make.bat` 构建。
+发布目录（合并后的 `main`）只有源码，没有 `pkg/` 编译产物，`bin/` 下也没有 `go`。
+直接用它会报错。必须先 `./make.bash` 构建 —— macOS 上的等价流程见 §6.7。
 
 ### 6.7 刷新 macOS 的已装工具链（`~/go1.27.1-ohos`）
 
@@ -504,7 +511,7 @@ cd ~ && tar czf /tmp/go1.27.1-ohos-beta2-darwin-arm64.tar.gz \
 
 > **那两个 `openharmony_*` 排除项是 2026-09-23 补的，别删。** 在装好的树上跑过设备测试之后，
 > 树里会多出 `bin/openharmony_arm64/` 与 `pkg/tool/openharmony_arm64/` —— 那是 `-exec` 包装
-> **自己按需编出来的目标架构工具链**（`misc/go_openharmony_exec/main.go:239`，日志里那句
+> **自己按需编出来的目标架构工具链**（`misc/go_openharmony_exec/main.go:303`，日志里那句
 > `building the openharmony/arm64 toolchain (one time)`），**是缓存不是发行内容**：
 > 它 `Stat` 一下不存在就现编，没有也照常工作。
 > 不带这两条的话包里会多约 200 MB（实测 69 MiB → 247 MB），而**条目数只多 30 来条** ——
@@ -600,7 +607,7 @@ GOOS=openharmony GOARCH=amd64 CGO_ENABLED=0 go build -o app64 main.go 2>&1 \
 
 ## 7. 验证清单
 
-```powershell
+```bash
 # 冲突标记清零
 git grep -n -e '<<<<<<< HEAD' -e '>>>>>>> <tag>' -- .
 
@@ -627,16 +634,18 @@ go test runtime   # 耗时较长（~4 分钟）
 # 1) OHOS c-shared 交叉编译（x86_64 + arm64）
 #    用 OHOS SDK clang + sysroot
 GOOS=openharmony GOARCH=amd64 CGO_ENABLED=1 \
-CC="<sdk>/llvm/bin/clang.exe --target=x86_64-linux-ohos --sysroot=<sdk>/sysroot -D__MUSL__" \
-AR="<sdk>/llvm/bin/llvm-ar.exe" \
+CC="<sdk>/llvm/bin/clang --target=x86_64-linux-ohos --sysroot=<sdk>/sysroot -D__MUSL__" \
+AR="<sdk>/llvm/bin/llvm-ar" \
 go build -buildmode=c-shared -o out.so .
 
 # 2) 确认 delta 保留
 git diff <上游tag> -- src/runtime/os_linux.go   # 应只剩 OHOS musl hunks
 git diff <上游tag> -- src/internal/platform/zosarch.go  # openharmony 条目在
 
-# 3) 真机/模拟器运行（flutter）
-fvm flutter run -d 127.0.0.1:5555   # 需 GOROOT 指向 OHOS 工具链
+# 3) 设备上跑测试（-exec 包装自动执行）
+#    前提：用仓库的 ./bin/go，$GOROOT/bin 在 PATH 上（否则 go 找不到包装 → exec format error）
+export PATH="$PWD/bin:$PATH"
+GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 ../bin/go test strings
 
 # 4) 能力验收夹具（misc/openharmony/，结论见 §4.2）
 SDK=<sdk>; LLVM=$SDK/native/llvm/bin
@@ -667,14 +676,18 @@ cd misc                                   # 夹具在 misc 模块里，必须在
 
 ```bash
 git add <resolved files>
-git commit -m "Merge tag 'go1.26.5' into ohos-1.24-base"
-git push origin ohos-1.24-base
+git commit -m "Merge tag '<新上游tag>' into main"
+git push origin main
 ```
 
-### 8.2 建 PR（关键：历史桥接）
+### 8.2 建 PR（历史桥接 —— 已过时，仅供同类情形参考）
 
-`main` 分支与开发分支无共同历史，GitHub 拒绝建 PR（"no history in common"）。
-必须先在分支上造一个把 main 当祖先、但树保持干净的 merge 提交：
+> **已不适用（2026-09-25 起）**：`sysit/ohos-go` 的默认分支已是 `main`，且 `ohos-1.27-base`
+> 本就是 `main` 的祖先（`git merge-base --is-ancestor ohos-1.27-base main` 返回 0），两分支
+> 历史已通，直接推 `main` 即可，**无需桥接**。以下配方只在「`main` 与开发分支无共同历史、
+> GitHub 拒建 PR（"no history in common"）」时才用。
+
+原情形：需先在分支上造一个把 main 当祖先、但树保持干净的 merge 提交：
 
 ```bash
 # 1) 造 merge 提交：tree 用干净分支树，parents = (分支, main)
@@ -686,7 +699,7 @@ git reset --hard $new
 
 # 2) 推送 + 建 PR（gh 需指定仓库，避免认错仓库）
 git push origin <分支>
-gh pr create -R star4277/ohos-go --base main --head <分支> --title "..." --body-file body.md
+gh pr create -R sysit/ohos-go --base main --head <分支> --title "..." --body-file body.md
 ```
 
 注意：
@@ -696,13 +709,14 @@ gh pr create -R star4277/ohos-go --base main --head <分支> --title "..." --bod
 
 ---
 
-## 9. 环境参考（Windows）
+## 9. 环境参考
 
-| 项 | 路径 |
+> 早期有一节 Windows 环境表（`D:\ProgramFiles\DeveloperToolKit\…`、`clash_ui` 项目等），
+> 那是前一轮开发机上的记录，现已删除 —— 当前宿主是下面两台。
+
+| 项 | 值 |
 |---|---|
-| 官方 go（bootstrap） | `D:\ProgramFiles\DeveloperToolKit\Golang\go\go` |
-| 发布目录（合并后 main） | `D:\ProgramFiles\DeveloperToolKit\Golang\go\versions\ohos-go` |
-| OHOS SDK | `D:\ProgramFiles\DeveloperToolKit\Jetbrains\Huawei\DevEcoStudio\sdk\default\openharmony\native` |
-| OHOS 模拟器地址 | `127.0.0.1:5555` |
-| 开发目录 | `D:\Projects\c\ohos-go` |
-| clash_ui 项目 | `D:\Projects\clash_ui`（`go\` 是 Go 模块，`go_builder\ohos` 是插件） |
+| macOS 宿主（主开发机） | 仓库 `~/projects/ohos-go`；已装工具链 `~/go1.27.1-ohos`（§6.7）；bootstrap `GOROOT_BOOTSTRAP=/opt/homebrew/opt/go/libexec`（实测 go1.26.5） |
+| OHOS SDK | `/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony`（设成 `OHOS_SDK`） |
+| Linux 宿主 | `ssh root@172.16.1.238`（Debian 13，8 核）。树 `/root/ohos-go` 是 **rsync 拷贝、不是 git 仓库**；bootstrap `/usr/lib/go-1.25`（`golang-1.25-go`）；**没有 OHOS SDK**，所以只跑得到 A 层（宿主侧，基线 377 ok / 0 FAIL），cgo 与全部 openharmony 目标跑不了。同步源码用**锚定斜杠**的 `--exclude '/pkg/'`，写 `'pkg/'` 会排掉上游签入的 `src/cmd/api/testdata/src/pkg` 导致假红 |
+| 设备 | 模拟器 `127.0.0.1:5555`（aarch64，能 exec，全量设备测试落它）；商用真机 `4VM0125513000074` 的 `sh` 域拒绝 exec `/data/local/tmp` 下的未签名二进制。两台都是 **39 位 VMA**（决定 `-race` 开不开门，见 §4.2） |

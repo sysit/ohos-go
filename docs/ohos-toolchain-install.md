@@ -1,4 +1,4 @@
-# OHOS Go 工具链安装（go1.27.1-ohos beta2）
+# OHOS Go 工具链安装（go1.27.1-ohos）
 
 ## 这是什么
 
@@ -6,20 +6,24 @@
 **go1.27.1**（`VERSION` 文件是权威）。发布形态是**预编译树 + tag**，所以你不需要
 `./make.bash`（那要 3 阶段自举，还要一个 go1.24.6+ 的 bootstrap）。
 
-本 beta 发布 **darwin/arm64** 与 **linux/amd64** 两个宿主 —— 两份都在各自宿主上全量
+本版本发布 **darwin/arm64** 与 **linux/amd64** 两个宿主 —— 两份都在各自宿主上全量
 重建并实测过，不是交叉产出的。其他宿主可自行 `make.bash`（见文末）。
 支持的目标只有 `openharmony/arm64` 与 `openharmony/amd64` —— **与宿主架构无关**。
 
 > **版本串**：`VERSION` 与 `go version` 都报 **`go1.27.1-ohos`**，好区分 fork 与上游。
 > （已发布的 **beta1** tarball 早于这处改动，里面报的还是裸 `go1.27.1`，与上游逐字相同。）
+>
+> **下载 beta2 的用户**：文件名里带 `-beta2-`（`go1.27.1-ohos-beta2-<宿主>.tar.gz`），
+> 安装步骤与下列完全一致，只是把文件名换成带 `-beta2-` 的那份，已知问题看
+> `docs/ohos-release-notes-v1.27.1-beta2.md`。
 
 ## 拿到与解包
 
 挑你宿主的那份（`<宿主>` = `darwin-arm64` 或 `linux-amd64`）：
 
 ```bash
-shasum -a 256 -c go1.27.1-ohos-beta2-<宿主>.tar.gz.sha256   # Linux 用 sha256sum -c
-cd ~ && tar xzf /path/to/go1.27.1-ohos-beta2-<宿主>.tar.gz
+shasum -a 256 -c go1.27.1-ohos-<宿主>.tar.gz.sha256   # Linux 用 sha256sum -c
+cd ~ && tar xzf /path/to/go1.27.1-ohos-<宿主>.tar.gz
 # → ~/go1.27.1-ohos
 ```
 
@@ -35,7 +39,7 @@ cd ~ && tar xzf /path/to/go1.27.1-ohos-beta2-<宿主>.tar.gz
 ### 1. `$OHOS_GO_ROOT/bin` 必须在 `PATH` 上
 
 不是舒服不方便的问题，是**功能开关**：`go` 用 `pathcache.LookPath("go_<GOOS>_<GOARCH>_exec")`
-（`cmd/go/internal/work/build.go:902`）找 `-exec` 包装，而它就是裸 `exec.LookPath`，
+（`cmd/go/internal/work/build.go:909`）找 `-exec` 包装，而它就是裸 `exec.LookPath`，
 **没有 `$GOROOT/bin` 兜底**。不在 `PATH` 上的后果是交叉测试时试图在宿主上直接执行
 aarch64 二进制，报 **`exec format error`** —— 一个完全指错方向的错。
 
@@ -177,7 +181,8 @@ go clean -cache          # 或用新的 GOCACHE 目录
 
 验收结论（每种 buildmode、sanitizer、TLS、x509 的实际可用性）在
 `docs/go-upgrade-guide.md` **§4.2**，每条都附设备上的实测证据。
-本 beta 的已知问题清单在 `docs/ohos-release-notes-v1.27.1-beta2.md`。
+本版本的已知问题清单在 `docs/ohos-release-notes-v1.27.1-ohos.md`（beta2 用户看
+`docs/ohos-release-notes-v1.27.1-beta2.md`）。
 
 ## 上游跟进（这个移植怎么保鲜）
 

@@ -249,7 +249,7 @@ jobs:
             fi
           done
           [ "$dirty" = 0 ] || exit 1
-          echo "bin/ 下没有构建树路径（bin/go 与手工装的 _exec 包装都在内）"
+          echo "bin/ 下没有构建树路径"
 
           mkdir -p "$E/work" && cd "$E/work"
           printf 'package main\nfunc main(){}\n' > main.go
@@ -265,7 +265,8 @@ jobs:
   all-bash:
     name: A 层全量 ./all.bash
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # 与上面 host job 同一个理由：A 层基线（377 ok / 0 FAIL）是在 24.04 上量的，写死版本
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7

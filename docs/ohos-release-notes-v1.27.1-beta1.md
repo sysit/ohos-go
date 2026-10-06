@@ -49,7 +49,7 @@ SDK clang 绝对路径、`go.env` 的 `GOTOOLCHAIN=local` 不要改）各对应�
 |---|---|---|
 | **A** 宿主编译器自测 | 编译器/链接器在宿主上的正确性 | **【beta1 之后重跑 ×2】** 首轮 3 FAIL：2 条真缺陷 = 10 个被 `.gitignore` 吞掉的上游二进制 testdata（已按 blob sha 补回，转绿）；1 条 = 使用者自己的 `~/.gitconfig` `http(s).proxy` 把测试的 `127.0.0.1` 也代走了。在**最终树**上再跑一轮：**只剩那 1 条环境干扰**，且已用 `GIT_CONFIG_GLOBAL=/dev/null` 反证（同一包转 `ok`）。**基线没坏** |
 | **B** 交叉编译 + 设备执行 | 262 个**有测试的** std 包能不能编、能不能在设备上跑 | **239 PASS / 23 FAIL / 0 TIMEOUT / 0 WRAPPER** |
-| **C** `test/` 编译器测试集 | 2734 个编译/链接/运行用例 | **2739 RUN / 132 FAIL** |
+| **C** `test/` 编译器测试集 | 编译 + 链接 + 设备上运行 | **2739 RUN / 132 FAIL** |
 | **端到端** | 真实下游项目构建 | `v2rayHM/scripts/build_libxray_ohos.sh` 退出 0，产物过全部检查 |
 
 **B 层 23 条 FAIL 全部落已知类**：环回类 17 包、unix socket/SCM_RIGHTS、设备权限模型、
@@ -65,7 +65,8 @@ testdir 的 `rundir` 系列自己调 `go tool link` 且**不传 `-buildmode`**�
 **端到端证据**（`build_libxray_ohos.sh`，libxray v26.9.9 + SSR 插件）：
 
 - 工具链：`go version go1.27.1 darwin/arm64`；`GOOS=openharmony`、`-buildmode=c-shared`、`-trimpath=true`
-- 产物 35978936 字节，与仓库里已提交的 `prebuilt/arm64-v8a/libxray.so` 逐项属性一致
+- 产物 35978936 字节，与下游 v2rayHM 仓库里已提交的
+  `entry/src/main/cpp/prebuilt/arm64-v8a/libxray.so` 逐项属性一致
   （ELF 头只差 section-header offset，导出集完全相同）
 - `nm -D` 导出集恰为 `CGoFree` + `CGoInvoke`
 - `PT_TLS` 段、`R_AARCH64_TLSDESC` 重定位、`GOOS=openharmony` 字符串均在
@@ -214,7 +215,7 @@ C 层 125 条 `R_ARM64_TLS_IE` FAIL 挡在**链接期**，而它们里绝大多�
 
 ## 与上一代（v1.26.5）的差异
 
-- 基线 go1.27.1（上一代是 go1.24.5）
+- 基线 go1.27.1（上一代是 go1.26.5）
 - **默认 PIE 已落码**：上一代的树编 cgo 可执行文件会在 `init()` 之前 `Signal 11`，
   这一代默认 buildmode 就产出可运行的 PIE（配 musl 解释器，二者缺一不可）
 - `-exec` 包装镜像**整棵 GOROOT**（上一代只推包目录），B 层 FAIL 36 → 23

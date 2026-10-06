@@ -25,7 +25,7 @@
 | 回程解析回归 | `misc/go_openharmony_exec/exitcode_test.go` | 7 例表驱动，防「设备没回传状态被当成成功」；已注册进 dist（`misc:execwrapper`），`./all.bash` 会跑 |
 | 镜像/推送回归 | `misc/go_openharmony_exec/runmain_test.go` | 用假 hdc 驱动整个 `runMain`，断言「源文件树推出去了」+「从镜像里 `cd` 进去跑」（两条断言均做过变异验证：改坏哪条哪条红）；另一例覆盖 hdc「打 `[Fail]` 但 exit 0」 |
 | `test/` 驱动器 | `src/cmd/internal/testdir` | `-target goos/goarch` 交叉编译；`findExecCmd` 已按同一约定自动找包装 |
-| 能力夹具 | `misc/openharmony/`（9 个目录） | 每种 buildmode 一个夹具 + `probe` 事实采集器 + `ohosrun` 推送壳 |
+| 能力夹具 | `misc/openharmony/`（10 个目录） | 每种 buildmode 一个夹具 + `probe` 事实采集器 + `ohosrun` 推送壳 |
 | 推送壳 | `misc/openharmony/ohosrun` | 不经 `go test` 时手工推送执行 |
 | **阶段 2/3 驱动器** | `misc/openharmony/runtests.sh` | 上面三个硬前提（`bin/go`、SDK clang 绝对路径、`$GOROOT/bin` 上 PATH）脚本自己设好，照抄必踩的三条不用记。一个包一次 `go test`，配主机侧看门狗 + 每包独立日志，结论追加 `results.tsv`，重跑自动跳过已 PASS。`--all` = B 层 262 个有测试的包；`--list` 只看清单 |
 
@@ -44,7 +44,7 @@
   cp $GOROOT/bin/go_openharmony_arm64_exec $GOROOT/bin/go_openharmony_amd64_exec
   ```
 - **`$GOROOT/bin` 必须在 `PATH` 上**（`export PATH="$GOROOT/bin:$PATH"`），否则 `pathcache.LookPath` 找不到包装（`cmd/go/internal/work/build.go:909`），症状是 `fork/exec …/pkg.test: exec format error` —— 宿主直接去 exec 交叉二进制了。它**只查 PATH，没有 `$GOROOT/bin` 兜底**（`src/cmd/internal/pathcache/lookpath.go` 就是裸 `exec.LookPath`）。
-- **包装把整棵 GOROOT 同步到设备，并在里面跑**（2026-09-21，取代原先「只镜像包目录」的做法；实测结果见 §5.6）。同步 = 手装设备原生 `go`（`GOOS=openharmony GOARCH=arm64 CGO_ENABLED=0 go install cmd` → `goroot/bin/go` + 174 MB 的 `pkg/tool/<target>/`）→ tar+gzip **`src`/`lib`/`test`/`VERSION`**（`mirrorEntries()` 的清单）→ 一次 `tar xzf` 落到 `/data/local/tmp/go_openharmony_exec/goroot`（364 MB / **12020 个源文件，与宿主逐一点过数**）。**为什么不逐文件 push**：hdc 的递归 `file send` 按**文件数**收费 —— 实测 6 ms/文件 × 12020 ≈ 75 s；单文件却跑到 **406 MB/s**。tar 一次 364 MB 只要 ~11 s。指纹（`mirrorEntries()` 列出的每一项的 sha256，即 `src`/`lib`/`test`/`VERSION`）缓存在宿主 `/tmp`、**文件名带 `<goos>_<goarch>` 后缀**（多设备共存时缺了它会把别人的树当成自己的），命中就跳过同步，所以续跑时每包只多 ~0.3 s 的走树。
+- **包装把整棵 GOROOT 同步到设备，并在里面跑**（2026-09-21，取代原先「只镜像包目录」的做法；实测结果见 §5.6）。同步 = 手装设备原生 `go`（`GOOS=openharmony GOARCH=arm64 CGO_ENABLED=0 go install cmd` → `goroot/bin/go` + 174 MB 的 `pkg/tool/<target>/`）→ tar+gzip **`src`/`lib`/`test`/`VERSION`**（`mirrorEntries()` 的清单）→ 一次 `tar xzf` 落到 `/data/local/tmp/go_openharmony_exec/goroot`（364 MB / **12020 个源文件，与宿主逐一点过数**）。**为什么不逐文件 push**：hdc 的递归 `file send` 按**文件数**收费 —— 实测 6 ms/文件 × 12020 ≈ 75 s；单文件却跑到 **406 MB/s**。tar 一次 364 MB 只要 ~11 s。指纹（`mirrorEntries()` 列出的每一项的 sha256，即 `src`/`lib`/`test`/`VERSION`）缓存在宿主 `/tmp`、**文件名带 `<target>` 后缀**（`OHOS_TARGET`，即 hdc 设备地址；多设备共存时缺了它会把别人的树当成自己的），命中就跳过同步，所以续跑时每包只多 ~0.3 s 的走树。
 - **设备执行环境由包装下发**（`deviceEnv`）：`GOROOT`/`PATH`/`TMPDIR`/`GOCACHE`/`GOPATH`/`HOME`/`GOTOOLCHAIN=local`/`GOPROXY`，外加 `forwardedEnv` 白名单（`GODEBUG`、`GOGC`、`GOMEMLIMIT`、`GOMAXPROCS`、`GOTRACEBACK`、`SSL_CERT_FILE`）。**`GOOS`/`GOARCH`/`CGO_ENABLED` 故意不转发**：前两个由设备原生 `go` 自己定；`CGO_ENABLED` 一旦下发就会改掉**测试进程自己**的 `build.Default`（`go/build/build.go:360` 读 `os.Getenv("CGO_ENABLED")`），而设备本来就报 0（它自己检测不到 C 编译器），下发的只会让环境与构建配置（宿主一律 `CGO_ENABLED=1`）不一致。android 版转发 `CGO_ENABLED=0` 是因为它的交叉编译默认就是 0，前提不同。
 - **cwd 从镜像里推**：包的源文件树就在 GOROOT 里的 `src/<import path>`，包装直接 `cd` 进去；只有**不在 GOROOT 里**的包（外部模块）才回落旧的 `pushSourceTree`。同步失败时 `syncGoroot` 返回空串，包装**退化成改动前的行为** —— 没有 GOROOT 的宿主照样能跑不需要源码树的包。
 - **`go run` 也走这套**，所以 `test/` 里的 `// run` 用例理论上会自动在设备上执行 —— **但这一条尚未验证**，是本方案要确认的第一个未知数（见 3.C）。
@@ -71,7 +71,7 @@
 - 规模（实测，`CGO_ENABLED=1`）：`go list std` = **381 包**，其中有测试的 **262 个有测试的包**
 - **cgo 开关会改变包集合，量数必须锁定一种配置。** 本方案一律用 `CGO_ENABLED=1`（cgo 才是这个 port 的主战场，musl TLS 整条链路都在里面）。作为对照：`CGO_ENABLED=0` 时 std 少两个包 —— `runtime/cgo` 与 `internal/runtime/cgobench` —— 总数 379，有测试的 260。**任何写「379」或「260」的旧记录都是 cgo 关的数，别用。**
 
-### C 层 —— `test/` 目录（编译器正确性，2734 例）
+### C 层 —— `test/` 目录（编译器正确性，实测 2739 RUN）
 
 | action | 例数 | 需要设备执行？ |
 |---|---|---|
@@ -86,7 +86,12 @@
 | `// runindir` | 11 | ✅ |
 | `// buildrundir` / `// builddir` / `// buildrun` | 9 | 部分 |
 
-即 **~1400 例只编译**（很快，可全量跑），**~1220 例要设备执行**（慢，是耗时大头）。实际数量会被 build tag 的 `shouldTest` 再砍掉一批。
+即 **~1450 例只编译**（很快，可全量跑），**~1220 例要设备执行**（慢，是耗时大头）。实际数量会被 build tag 的 `shouldTest` 再砍掉一批。
+
+> 这张表是**静态粗计**（按 `testdir` 的选择规则量 `test/` 目录，只算 `.go`），不是跑出来的行数：
+> 本树在 `openharmony/arm64` 上过滤后是 **2678 个用例**（`unix`/`test_run` 两个 tag 的语义差异不计入，
+> 本树没有 `unix` 标记的用例）。**它与 §5.7 记的 `2739 RUN` 不是同一个量** —— 后者是四个分片日志里
+> `=== RUN` 行的合计。两个数别互相对账。
 
 - 载体：`go test cmd/internal/testdir -target=openharmony/arm64`
 - **已验（阶段 0.1）**：`-target` 下 `// run` 确实经包装落到设备执行。附录证据见第 7 节阶段 0 的第 1 项。
@@ -140,7 +145,7 @@ go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 
 |---|---|---|
 | **依赖 cwd 的测试** | **已修**（阶段 0.4） | 原缺口：包装不设工作目录，设备上 `hdc shell` 的 cwd 就是 `/`（实测 `pwd` = `/`）。修前实例：`io/fs` 的 `TestGlob` 把根目录当测试目录，`os` 在 cwd 找 `os_test.go`/`stat_linux.go` → `could not find …`。修法：`pushSourceTree` 把包目录镜像到 `<work>/cwd/<宿主绝对路径>` 并 `cd` 进去 |
 | **依赖 `testdata/` 的测试** | **已修**（阶段 0.4） | 原缺口：包装不推送包的源文件树（修前实例：`text/template` 的 `TestParseFiles` → `open testdata/file1.tmpl: no such file`）。hdc 的 `file send` 递归拷目录，所以一次调用把源码和 `testdata/` 一起带过去 |
-| **需要 `$GOROOT` 落地的测试** | **阶段 2 实测已确认**，两个包 | 包装**不像** `go_android_exec` 那样把 GOROOT 拷到设备（它 527 行 vs 我们 264 行，少了 `adbCopyGoroot`/`adbCopyTree`/`pkgPath`）。实测命中 `time`（下详）。**注意这一类里有两种，可修性完全不同**，见下方「源文件可用性」 |
+| **需要 `$GOROOT` 落地的测试** | **已修**（§5.6，GOROOT 整树镜像） | 原缺口：包装不像 `go_android_exec` 那样把 GOROOT 拷到设备。2026-09-21 起 `syncGoroot`/`mirrorEntries` 会把 `src`/`lib`/`test`/`VERSION` 镜像到设备并在镜像里跑，这一类随之消失。**残留两个包，可修性完全不同**，见下方「源文件可用性」（`time` 的 `TestEnvTZUsage` 属权限类；`runtime` 的 `TestTracebackSystem` 是烧进测试二进制的编译期绝对路径，镜像也救不了） |
 | **任何依赖环境变量的测试** | **预期必挂** | **包装不下发 env**：`run()` 里 `cmd.Env` 未设，命令行只有二进制路径（`exec.Command(hdcPath, append(hdcArgs(target), "shell", cmdline+"; echo "+exitStr+"$?")...)`）。宿主 env 到不了设备进程。**这条推翻了本表原本对 `crypto/x509` 的处方** —— 「设 `SSL_CERT_FILE` 就好」是错的，宿主设了没用。**env 白名单后来已在 §5.6 补上**；而 x509 本身已于 2026-09-22 用 HAP 夹具在**应用域**定案：**根本不用设这个 env**，见 §5.3 的收口段 |
 | `-race` 变体 | 不开门 | 39 位 VMA vs Go race runtime 的 48 位布局；诊断工具，本方案不覆盖（§4.2），竞态在宿主上验 |
 | `-msan` 变体 | 不开门 | SDK 无 `libclang_rt.msan*`，且 MSan 要求插桩 libc（§4.2） |
@@ -151,7 +156,7 @@ go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' std   # 
 | **内存吃爆 guest → 整轮陪葬** | **必须开 `-short`**，见 §5.2 | 2026-09-21 实测：`archive/zip` 的 `TestZip64LargeDirectory` 峰值 RSS **~16GB**，把 4GB guest 打成 `Out of memory and no killable processes` → **kernel panic**。**后果不是那个包 FAIL，是模拟器卡死、整轮作废** |
 | SVE 硬件执行 | 不适用 | 只有汇编器验证（§4.2）；shell uid 读不了 `/proc/cpuinfo` |
 
-**前两类已经修掉了**（阶段 0.4），它们本来就不是平台限制，只是包装缺了 android 版的那几件事。**env 那一类仍未修** —— 剩下的 harness 噪音主要来自它，加上上面「环回 TCP」和「权限模型」两类**真·环境**限制（那两类修不了，只能登记）。
+**三类都已经修掉了**（cwd/testdata 见阶段 0.4，env 白名单见 §5.6）—— 它们本来就不是平台限制，只是包装缺了 android 版的那几件事。剩下的 FAIL 噪音主要来自上面「环回 TCP」和「权限模型」两类**真·环境**限制（那两类修不了，只能登记）。
 
 分界要守住：**FAIL 集合里「harness 缺口」和「环境限制」必须和「port 缺陷」分开标注**，否则信号被淹没。这是本方案最大的单一风险，见 §9。
 
@@ -311,7 +316,7 @@ crypto/internal/fips140/check.init.0()  …/check/check.go:93
 
 **背景**：这是 port 唯一一处上游没有的链接器 delta（`ld/decodesym.go` + `ld/lib.go` 的 `addendMap`），由 1.26.5 代带过来。按「忠于上游」的要求**从 1.27.1 源码 + 实测重推，而不是沿用**。结论：**它必要且正确**，但本轮修掉了两处缺陷。
 
-**它解决什么**：`-buildmode=shared` 产出的 `libstd.so` 里，type descriptor 的 `gcdata` 字段（`abi.Type` 偏移 32 = `2*PtrSize+8+1*PtrSize`）。该字段只在**主二进制拥有一个「类型定义在 shlib 里且含指针」的数据符号**时才被读到（唯一入口 `GCProg.AddType`，`data.go:1427`）。
+**它解决什么**：`-buildmode=shared` 产出的 `libstd.so` 里，type descriptor 的 `gcdata` 字段（`abi.Type` 偏移 32 = `2*PtrSize+8+1*PtrSize`）。该字段只在**主二进制拥有一个「类型定义在 shlib 里且含指针」的数据符号**时才被读到（唯一入口 `GCProg.AddType`，`data.go:1410`）。
 
 **上游的机制为什么覆盖不到**（三组独立证据）：
 
@@ -345,7 +350,7 @@ crypto/internal/fips140/check.init.0()  …/check/check.go:93
 
 探针结果 —— **触发条件比想象中窄**：必须是「主二进制里有**数据段全局变量**、其类型**定义在 shlib 里**、
 且 kind 落在 `default` 分支（指针/切片/map/接口；struct 会递归分解，不用 mask）」，即
-`GCProg.AddType`（`data.go:1427`）。**函数内的局部变量不触发**；**未被引用的全局变量会被 deadcode 删掉、
+`GCProg.AddType`（`data.go:1410`）。**函数内的局部变量不触发**；**未被引用的全局变量会被 deadcode 删掉、
 也不触发**（这两条各踩过一次，两轮空转才定位到）：
 
 | 架构 | `OHOSPROBE hit` | `miss` / `nosymvalue` / `nilsmap` |
@@ -383,7 +388,7 @@ zero symbol index」**由推测变成实测**。加上两条代码事实，amd64
 几个必须记的点：
 
 - **打包而不是逐文件推。** hdc 的开销是**按文件**计的：6 ms/文件 × 12020 个文件 ≈ 75 s；而单文件能跑到 406 MB/s。所以 tar+gzip 一次推（364 MB 未压缩 / 12020 文件）。
-- **指纹落在宿主 `/tmp`，带 target 后缀**（`go_openharmony_exec-goroot-sync-<goos>_<goarch>`）。不带后缀时第二台设备会被告知「树是最新的」——这个 bug 犯过一次。
+- **指纹落在宿主 `/tmp`，带 target 后缀**（`go_openharmony_exec-goroot-sync-<target>`，`target` = `OHOS_TARGET` 的设备地址）。不带后缀时第二台设备会被告知「树是最新的」——这个 bug 犯过一次。
 - **镜像清单只有一个来源**：`mirrorEntries()` 同时决定「推什么」和「指纹算什么」，避免两边漂移。`pkg/` 特意**不推**（那是 468 MB 的宿主构建缓存），只推其中的 `include` 和 `tool/<target>`。
 - **`test/` 和 `VERSION` 是必须的，不是顺手带的**：`go/types` 会 type-check `GOROOT/test/ken`；`cmd/dist`（经 `go tool dist list` 被 `crypto` 和 `internal/platform` 触达）的 `findgoversion()`（`cmd/dist/build.go:373`）**先读 `$GOROOT/VERSION`**，读不到才回落 `git log` —— 而设备上没有 `git`。
 - **env 走白名单透传**（`GODEBUG`/`GOGC`/`GOMEMLIMIT`/`GOMAXPROCS`/`GOTRACEBACK`/`SSL_CERT_FILE`），**故意不含 `CGO_ENABLED`**：见下面的新增类 1。上游 android 包装是直接 `export CGO_ENABLED=0` 的，这里没有跟。
@@ -424,7 +429,7 @@ zero symbol index」**由推测变成实测**。加上两条代码事实，amd64
 ### 5.7 C 层 `test/` 全量实测（2026-09-22）：132 FAIL，其中 125 条是同一个链接器致命错误
 
 B 层管「标准库能不能用」，C 层管「编译器/链接器对不对」——载体是
-`go test cmd/internal/testdir -target=openharmony/arm64`，2734 个用例。
+`go test cmd/internal/testdir -target=openharmony/arm64`，实测 2739 RUN。
 
 跑法（三条硬前提见 §3：用**仓库** `./bin/go`、`CC` 写 SDK clang 绝对路径、`$GOROOT/bin` 在 `PATH` 上）：
 
@@ -488,7 +493,7 @@ cmd := []string{goTool, "tool", "link", "-s", "-w", "-buildid=test", "-o", outfi
 而 `R_ARM64_TLS_IE` 会被发出来，是因为 OHOS 的运行时是 **iscgo** 构建
 （`runtime/tls_arm64.s` 的 `load_g` 走 IE/TLS 宏），stdlib 的 `.a` 里带这条重定位。
 **非 PIE 的内部链接没有实现这条重定位，是这个移植的已知空档；但 cmd/go 从不请求它** ——
-`platform.DefaultPIE` 对 openharmony 返回 true（`internal/platform/supported.go:242`，
+`platform.DefaultPIE` 对 openharmony 返回 true（`internal/platform/supported.go:252`，
 `case "android", "ios", "openharmony": return true`），默认 `go build` 出来就是 PIE。
 所以暴露面只限「testdir 这条手搓链接路径」。
 
@@ -587,7 +592,8 @@ ENOENT 特征）。修完后 12 个包**全部转绿**。
 > 首版资产（修复前那两份）已同名替换、tag 未动；这条闭环**是重打换来的**，不是指纹自动保证的。
 >
 > **2026-09-24 追加**：`743723f3…` 这个值**别拿去量新资产** —— 本次 `v1.27.1-ohos` 的两份
-> 又修了一次包装（7d），打包源是另一棵树，指纹 `bc958b2dca13…` / `3e8b4ece4304…`。
+> 又修了一次包装、打包源是另一棵树，最终资产指纹是 darwin `d681e0a3d13e…` / linux
+> `5b46c7d7242b…`（中间还有一轮 7d，`bc958b2dca13…` / `3e8b4ece4304…`，已被 7e 重打取代）。
 > **口径教训**：指纹算的是**整棵 `bin/`**，含 `-exec` 包装，所以换包装必然换指纹；
 > 要论证「换包没换编译器」得落到单个 `bin/go` 的哈希上（本次新旧两份逐字节相同，
 > `9cfddd979ec1c64f…`）。见 §5.10。
@@ -829,7 +835,7 @@ error: OHOS_SDK 里没有 clang: /nonexistent/native/llvm/bin/clang
 
 单设备串行。每个 std 包 = build + push + run：
 
-- build：本机，快，但 260 个包累积可观
+- build：本机，快，但 262 个包累积可观
 - push：std 测试二进制典型 2–10 MB，hdc 到模拟器约 1–3 s
 - run：方差极大 —— `time` 几秒，`net`/`crypto/tls` 几十秒，`runtime` 4 分钟以上
 
@@ -924,7 +930,7 @@ C 层快到**可以整轮重跑**（这也是 §5.10 那句「每次发版多花
 
 「全量可用」的判定不能是「脚本退出码 0」，那太容易被假通过污染（该 bug 已经发生过一次）。定为：
 
-1. B 层 260 包全部有结论（PASS / FAIL / SKIP+原因），**无「未执行」**
+1. B 层 262 包全部有结论（PASS / FAIL / SKIP+原因），**无「未执行」**
 2. FAIL 集合 ⊆ 第 5 节已知清单，或每条 FAIL 都有新记录的原因
 3. C 层可执行部分全绿，或 FAIL 同上有据
 4. 阶段 1 的 probe 显示设备事实未退化（`vma_bits_*`、split identity、CA 位置）
@@ -938,7 +944,7 @@ C 层快到**可以整轮重跑**（这也是 §5.10 那句「每次发版多花
 |---|---|
 | ~~harness 缺陷淹没真信号~~（**已闭环**） | 原风险：包装缺「建工作目录 + 推源文件树 + 下发 env」，会让 cwd/testdata/env 三类测试成片 FAIL。三项**均已补掉并实测兑现**：cwd/testdata 见 §7 阶段 0.4，GOROOT 整树镜像 + 设备原生 `go` + env 白名单见 **§5.6（36 FAIL → 23 FAIL）**。**残留（2026-09-22 已全部收口）**：`SSL_CERT_FILE` 已能下发；而 `crypto/x509` 与「环回 TCP listen 被禁」两类**都已在应用域用 HAP 夹具证伪** —— 前者应用域读得到系统根（无需 env），后者应用域 bind/listen/accept 全通。**两者原先记的「设备权限」都是 `sh` 域的载体限制，不是平台限制。** 见 §5.3 收口段与 release notes 已知问题 2。 |
 | **旧工具链污染测量**（已中过一次） | `~/go1.27.1-ohos` 早于 `2417e0834a9`，本轮第一遍测量全部作废重跑。**跑之前先核对工具链出处**（`git show HEAD:src/internal/platform/supported.go | grep -A2 'func DefaultPIE'` 应含 `openharmony`），别信目录名里的版本号。 |
-| **下游拿到过期工具链** | `~/go1.27.1-ohos` 就是 v2rayHM 的 `OHOS_GO_ROOT`，它缺 PIE 修复与 FIPS 修复（构建于 09-19 16:52，两个提交分别在 21:24 / 更晚）。**2026-09-22 做了 A/B 实测来界定波及面**（同一个 `cgomin`/`cshared` 夹具，只换工具链，都在模拟器上跑）：<br>• **c-shared `.so`（v2rayHM 实际产出的形态）：过期树产物 `Add(40,2)=42` / exit 0 —— 不受影响。** c-shared 走外部链接（clang 按 `--target` 自选 loader）且 `Flag_shared` → TLS 走 GD；`.so` 本身也没有 `PT_INTERP`（实测两者都是 0 段）。<br>• **cgo 可执行文件：过期树产物 `Signal 11` / exit 139，仓库树 `main reached` / exit 0 —— 确实坏。**<br>所以**别笼统说「下游会 Signal 11」** —— 受影响的是**可执行文件**（`go test` 二进制也是这一类），而 v2rayHM 编的是 `.so`。仍建议刷新那棵树（配方见 `docs/go-upgrade-guide.md` §6.7），但**不是**「一放出去就有人踩」的阻断项。 |
+| **下游拿到过期工具链** | `~/go1.27.1-ohos` 就是 v2rayHM 的 `OHOS_GO_ROOT`，它缺 PIE 修复与 FIPS 修复（构建于 `2417e0834a9` 之前 —— 该提交是 09-19 21:24，FIPS 那个更晚）。**2026-09-22 做了 A/B 实测来界定波及面**（同一个 `cgomin`/`cshared` 夹具，只换工具链，都在模拟器上跑）：<br>• **c-shared `.so`（v2rayHM 实际产出的形态）：过期树产物 `Add(40,2)=42` / exit 0 —— 不受影响。** c-shared 走外部链接（clang 按 `--target` 自选 loader）且 `Flag_shared` → TLS 走 GD；`.so` 本身也没有 `PT_INTERP`（实测两者都是 0 段）。<br>• **cgo 可执行文件：过期树产物 `Signal 11` / exit 139，仓库树 `main reached` / exit 0 —— 确实坏。**<br>所以**别笼统说「下游会 Signal 11」** —— 受影响的是**可执行文件**（`go test` 二进制也是这一类），而 v2rayHM 编的是 `.so`。仍建议刷新那棵树（配方见 `docs/go-upgrade-guide.md` §6.7），但**不是**「一放出去就有人踩」的阻断项。 |
 | 假通过 | 已发生过一次（`480afb8fc47`）。任何「结果解析」路径都要有回归测试，新脚本复用 `newExitFilter` 而不是自己拼 |
 | **模拟器会卡死，且只此一台**（已中过一次） | 2026-09-21 全量轮启动后 **~1 分钟即全包 `WRAPPER`**：`hdc` 报 `[Fail][E001005] Device not found or connected`（`hdc list targets` 空、`tconn` 拒连），而 `Emulator -start Pura 90 API24` 进程仍在、`Rs` 状态吃 **474% CPU** 空转 —— **不会自愈，只能重启**。真机 `4VM0125513000074` 因 HMMAC 拒 exec 顶不上来，所以这一台挂了全量就停摆。<br>**缓解**：`runtests.sh` 的续跑正是为此 —— 重启设备后原样再跑一次即可，已 PASS 的自动跳过，不用从头来。**注意 results.tsv 里会出现同一包的多行**（脚本是追加写），分析时按「后写的覆盖先写的」读。建议先把 probe 存基线以便比对漂移。 |
 | **宿主链接器换了，链接器的假设要重验** | §5.4 的教训值得推广：port 为 openharmony 选了 **lld**（`lib.go:1727`），于是 `cmd/link` 里任何**「最终 ELF 长什么样」的假设**都可能不成立。FIPS 只是撞上的那一个 —— `elffips` 假定 RELATIVE 的 addend 已预存进 section 数据，lld 不那样写。**同类可疑点还有 `decodesym.go` 的 `decodetypeGcprogShlibByReloc` 等直接读外部链接产物的地方**（该点 **2026-09-21 已复验并修掉两处缺陷，见 §5.5**），下次升级上游或换 SDK 版本时仍要优先复验。判据：**凡是「链接期算一遍、运行期再核对一遍」的机制（完整性校验、校验和、签名）都要在设备上实测**，链接期不报错不代表对 |

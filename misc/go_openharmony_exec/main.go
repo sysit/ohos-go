@@ -181,7 +181,7 @@ func fail(what string, err error) int {
 // The wrapper's streams belong to the program it proxies, and callers compare
 // them. cmd/internal/testdir points the test binary's stdout and stderr at one
 // buffer (testdir_test.go:645), so a routine notice here fails whichever test
-// happened to run first; runtests.sh:320 likewise reads a bare "go_openharmony_exec:"
+// happened to run first; runtests.sh:337 likewise reads a bare "go_openharmony_exec:"
 // line as a wrapper failure. Both only bite on a fresh unpack -- where the
 // device toolchain is not built yet there is nothing to announce -- which is
 // exactly the tree a user downloads.

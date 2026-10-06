@@ -38,7 +38,7 @@ Linux 服务器上交叉编译是很常见的用法，所以这一版同时发�
 - 仓库里的 `go.env` 现在是 `GOTOOLCHAIN=local`，与发布物逐字一致。此前仓库里是上游的
   `auto`，靠打包时排除 `go.env` 兜着 —— 发布物行为没错，但「仓库不是唯一真相」是个雷，已拆。
 
-**5. 仓库新增宿主侧 CI**（`.github/workflows/ohos.yml`）：PR 与 push 在 ubuntu-latest +
+**5. 仓库新增宿主侧 CI**（`.github/workflows/ohos.yml`）：PR 与 push 在 ubuntu-24.04 +
 macos-14 双宿主上重建并跑门禁包，夜间跑一次 `./all.bash` 全量。**对使用者没有直接影响**，
 只是让「这棵树还能自己立起来」这件事有自动证据。
 
@@ -71,9 +71,9 @@ cd ~ && tar xzf /path/to/go1.27.1-ohos-beta2-<宿主>.tar.gz          # → ~/go
 export PATH="$HOME/go1.27.1-ohos/bin:$PATH"                         # 是功能开关，见下
 ```
 
-**先读 `docs/ohos-toolchain-install.md`（在树里）** —— 三条硬前提（`bin` 上 `PATH`、`CC` 写
-SDK clang 绝对路径、`go.env` 的 `GOTOOLCHAIN=local` 不要改）各对应一个**指向错误方向**的报错，
-不知道就查不出来。
+**先读 `docs/ohos-toolchain-install.md`（在树里）** —— 四条硬前提（`bin` 上 `PATH`、`CC` 写
+SDK clang 绝对路径、`go.env` 的 `GOTOOLCHAIN=local` 不要改、目标为 amd64 时 `CGO_ENABLED=1`）
+各对应一个**指向错误方向**的报错，不知道就查不出来。
 
 > **包体小了一半（167 MB → 69 MB）不是缺东西。** beta2 只打 `pkg/tool` + `pkg/include`
 > —— 与上游官方发行包形状一致；`bin/ go.env VERSION src/ test/ api/ lib/ misc/ doc/` 一个不少。
@@ -109,7 +109,7 @@ SDK clang 绝对路径、`go.env` 的 `GOTOOLCHAIN=local` 不要改）各对应�
 |---|---|---|
 | **A** 宿主编译器自测 | 编译器/链接器在宿主上的正确性 | **linux/amd64：377 ok / 0 FAIL**（`GIT_CONFIG_GLOBAL=/dev/null`）；**darwin/arm64：1 FAIL**，是使用者自己 `~/.gitconfig` 的 `http(s).proxy` 把测试的 `127.0.0.1` 也代走了（`codehost`），同一包在代理摘掉后转 `ok`。**基线没坏** |
 | **B** 交叉编译 + 设备执行 | 262 个**有测试的** std 包能不能编、能不能在设备上跑 | beta1 树：**239 PASS / 23 FAIL / 0 TIMEOUT / 0 WRAPPER**；交付物上重跑（2026-09-23，修完 7c 之后）：**240 PASS / 22 FAIL / 0 / 0** |
-| **C** `test/` 编译器测试集 | 2734 个编译/链接/运行用例 | **2739 RUN / 132 FAIL** |
+| **C** `test/` 编译器测试集 | 编译 + 链接 + 设备上运行 | **2739 RUN / 132 FAIL** |
 | **端到端** | 真实下游项目构建 | `v2rayHM/scripts/build_libxray_ohos.sh` 退出 0，产物过全部检查 |
 | **真机长稳** | 下游载体在**真机**上长时间跑 Go 编出的 c-shared（唯一一条由下游产出的证据） | 30 分钟连续：PID 一次未变、RSS/Threads/goroutine 无单调上升；**工具链指纹与 darwin 资产同源**（该指纹是 `bin/` 顶层哈希，只对 darwin 那份成立） |
 
@@ -152,7 +152,8 @@ testdir 的 `rundir` 系列自己调 `go tool link` 且**不传 `-buildmode`**�
 
 - 工具链：`go version go1.27.1 darwin/arm64`（那棵树还没有 `-ohos` 标记）；
   `GOOS=openharmony`、`-buildmode=c-shared`、`-trimpath=true`
-- 产物 35978936 字节，与仓库里已提交的 `prebuilt/arm64-v8a/libxray.so` 逐项属性一致
+- 产物 35978936 字节，与下游 v2rayHM 仓库里已提交的
+  `entry/src/main/cpp/prebuilt/arm64-v8a/libxray.so` 逐项属性一致
   （ELF 头只差 section-header offset，导出集完全相同）
 - `nm -D` 导出集恰为 `CGoFree` + `CGoInvoke`
 - `PT_TLS` 段、`R_AARCH64_TLSDESC` 重定位、`GOOS=openharmony` 字符串均在
@@ -374,7 +375,7 @@ C 层 125 条 `R_ARM64_TLS_IE` FAIL 挡在**链接期**，而它们里绝大多�
 
 ## 与上一代（v1.26.5）的差异
 
-- 基线 go1.27.1（上一代是 go1.24.5）
+- 基线 go1.27.1（上一代是 go1.26.5）
 - **默认 PIE 已落码**：上一代的树编 cgo 可执行文件会在 `init()` 之前 `Signal 11`，
   这一代默认 buildmode 就产出可运行的 PIE（配 musl 解释器，二者缺一不可）
 - `-exec` 包装镜像**整棵 GOROOT**（上一代只推包目录），B 层 FAIL 36 → 23

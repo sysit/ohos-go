@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-A fork of the Go toolchain (`golang/go`) that adds **OpenHarmony (OHOS)** as a supported platform. It is a full Go source tree, not a Go module. `VERSION` tracks the upstream release it is based on (currently `go1.26.5`).
+A fork of the Go toolchain (`golang/go`) that adds **OpenHarmony (OHOS)** as a supported platform. It is a full Go source tree, not a Go module. `VERSION` tracks the upstream release it is based on (currently `go1.27.1-ohos`).
 
 Branches:
-- `main` — the default branch and active OHOS tree (upstream go1.27.1 + OHOS delta); development happens here (since 2026-09-25)
-- `ohos-1.27-base` — the go1.27 development branch; now equal to `main` and kept as history (v1.27.1-beta1/beta2/ohos were cut from it)
-- `release-branch.go1.26` — the previous generation (upstream go1.26.5 + OHOS delta), kept as the source of the authoritative delta
+- `main` — the default branch and active OHOS tree (upstream `go1.27.1` + OHOS delta); development happens here (since 2026-09-25)
+- `ohos-1.27-base` — the go1.27 development branch; an ancestor of `main` kept as history (v1.27.1-beta1/beta2/ohos were cut from it)
+- `release-branch.go1.26` — the previous code generation (upstream go1.26.5 + OHOS delta, `VERSION` = `go1.26.5`), kept as the source of the authoritative delta. Note the fork's *released* lineage is shorter: before `v1.27.1-*` the only published points are `v1.24.5` (stable) and `v1.26.5-beta1` (prerelease), cut on `star4277/ohos-go` — see "Git remote state" below
 
 ## Commands
 
@@ -90,11 +90,13 @@ Upstream moved `getGodebugEarly()` to run *before* `mallocinit()`. The OHOS musl
 
 Its §4 is the checklist of OHOS capabilities to re-verify after every merge, and §6 catalogues the specific conflicts previously hit (arm64 `asm7.go` case-number collisions, duplicate `sizeFixups` loops, a dropped `goos` var in `cmd/go/go_test.go`).
 
-The `.claude/skills/merge-upstream/` skill is the executable summary of that playbook — it adds the conflict-classification table, the residual-diff verification gate, and the PR history-bridging `commit-tree` recipe.
+The `.claude/skills/merge-upstream/` skill is the executable summary of that playbook — it adds the conflict-classification table and the residual-diff verification gate. (It also records the PR history-bridging `commit-tree` recipe as **obsolete** — the branches share history since 2026-09-25.)
 
 ### Git remote state
 
-This clone is a **partial clone** (`blob:none` promisor) of the fork, and historically carried **no upstream Go tags at all** — only two fork tags (`v1.24.5`, `v1.26.5-beta1`). An `upstream` remote pointing at `https://github.com/golang/go.git` has since been added, but its tags are **not yet fetched**; `git fetch upstream --tags` (or `git fetch upstream tag go1.27.0`) is required before any upstream tag can be merged. The pre-flight section of the merge skill assumes this.
+This clone is a **partial clone** (`blob:none` promisor) of the fork. The fork's history descends from `star4277/ohos-go` — the repo where its pre-`v1.27.1` releases were cut (`v1.24.5` stable, `v1.26.5-beta1` prerelease); both of those tags are still ancestors of `main` here, and both `star4277/ohos-go` and the current `sysit/ohos-go` exist as separate repos today (hence the `star4277` references the docs used to carry).
+
+The `upstream` remote points at `https://github.com/golang/go.git` and its tags **are fetched** (381 of them, through `go1.27.1`); `git fetch upstream tag <tag>` is only needed for something newer. Fork tags so far: `v1.24.5`, `v1.26.5-beta1`, `v1.27.1-beta1`, `v1.27.1-beta2`, `v1.27.1-ohos`. The pre-flight section of the merge skill assumes this.
 
 ## Tooling notes
 

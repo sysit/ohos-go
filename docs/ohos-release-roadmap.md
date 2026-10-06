@@ -276,7 +276,7 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
    `ctxt.Tls == "GD" || (isOpenharmony && ctxt.Flag_shared)`。openharmony 的 `DefaultPIE` 为真
    ⇒ 默认构建就是 PIE ⇒ **cmd/compile 拿到 `-shared`**（实测：一轮默认构建里 **465 次 compile
    调用全带 `-shared`**）⇒ `Flag_shared` 恒真 ⇒ **每次默认构建都为 g 寄存器重载发 `R_AMD64_TLS_GD`**。
-2. 内部链接器**没有**这条重定位的实现（`ld/data.go:353` 直接 `log.Fatalf`），只有外部路径有
+2. 内部链接器**没有**这条重定位的实现（`ld/data.go:359` 直接 `log.Fatalf`），只有外部路径有
    （`amd64/asm.go:475`）。而 `MustLinkExternal` 里 openharmony **只在 `withCgo` 分支返回 true**
    ⇒ 非 cgo 构建走内部链接 ⇒ 必死。
 
@@ -376,7 +376,8 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 起迁到 Ubuntu 26。上面那条基线（377 ok / 0 FAIL）是在 24.04 上量的，漂移后
 **红的可能是宿主而不是代码**，且没有任何东西提醒你宿主换了。已处置两块：
 
-- 矩阵里 ubuntu 一格**写死 `ubuntu-24.04`**（与 `macos-14` 对称），把这次切换
+- 矩阵里 ubuntu 一格**写死 `ubuntu-24.04`**（与 `macos-14` 对称），夜间 `all-bash`
+  那一格原先漏成 `ubuntu-latest`、2026-10-06 一并写死，把这次切换
   从「悄悄发生」变成「改一行 + 重量基线」的显式动作；
 - 加了一步「宿主身份」，把 `os-release` / `uname` / `cc` / bootstrap 版本打进日志 ——
   固定标签的镜像**本身也会按月更新**，这步是唯一能事后回答「当时是哪台机器」的东西。
@@ -419,8 +420,9 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 - **仓库**（= 下次打包的源）：`GOTOOLCHAIN=auto` —— **上游的原值，OHOS 那行不在**
 - **已装树**（= 已发出去的 beta1）：`GOTOOLCHAIN=local` + 一段解释注释
 
-`git log -- go.env` 显示本分支只有一个提交动过它（`4cc31134303`，7 月），而且是**原样搬上游**。
-也就是说 **这条 delta 从来没进过仓库** —— 已装树里的 `local` 是某次手工改的，**不可从仓库复现**。
+修复前 `git log -- go.env` 只有一个提交动过它（`4cc31134303`，7 月），而且是**原样搬上游**。
+也就是说 **这条 delta 当时从没进过仓库** —— 已装树里的 `local` 是某次手工改的，**不可从仓库复现**。
+（现已多出 `67cd26538a`，就是本节的修复；`go-upgrade-guide.md` §4.1 那张表也加了守卫。）
 
 机制，实测（`/tmp/tcprobe`，一个 `go 1.28` 的模块）：
 
@@ -474,7 +476,8 @@ B 层抓到 **7c**（包装嵌构建机绝对路径 → 12 个包假红），C �
 打包源就是跑出 240/22 的那棵树（指纹 `743723f3…` —— 指纹只算 `bin/` 顶层，文档改动不进）。
 所以那条成立是靠**重打**换来的，不是靠指纹自动保证的：指纹只是让这件事**可查**，不能让它被省略。
 **本次 `v1.27.1-ohos` 同理**：因为 7d，两份资产又重打了一次，打包源 = 跑过 B 层**和** C 层的那棵树
-（指纹 `bc958b2dca13…` / `3e8b4ece4304…`）。
+（最终指纹 darwin `d681e0a3d13e…` / linux `5b46c7d7242b…`；7d 那轮是
+`bc958b2dca13…` / `3e8b4ece4304…`，已被 7e 取代）。
 
 > **口径提醒（本次踩到）**：指纹算**整棵 `bin/`**，含 `_exec` 包装，而 7c/7d 修的正是包装 ——
 > 所以**换包装必然换指纹**。要论证「换包没换编译器」，得落到单个 `bin/go` 的 sha256 上
