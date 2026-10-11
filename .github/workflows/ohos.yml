@@ -42,11 +42,11 @@ jobs:
         # misc 包装、AR 的形态），单宿主看不出来。
         #
         # 两个都**写死版本**，不用 -latest：ubuntu-latest 从 2026-10-19 起迁到
-        # Ubuntu 26，而 A 层基线（377 ok / 0 FAIL）是在 24.04 上量的 —— 漂了之后
-        # 红的是基线不是代码，且没有任何东西提醒你宿主换了。写死版本让这次切换
-        # 变成一次**显式的**升级动作（改这一行 + 重量基线）。macos-14 本来就是
-        # 写死的，两格对称。
-        os: [ubuntu-24.04, macos-14]
+        # Ubuntu 26，宿主 OS 一旦静默漂移，红的是环境不是代码且无人提醒。
+        # 2026-10-11 显式升到 26.04（roadmap ⑩.3）：同日在 26.04 上重量了 A 层基线，
+        # 数字见 roadmap §⑥——别只改版本号不重量基线。macos-14 本来就是写死的，
+        # 两格对称。
+        os: [ubuntu-26.04, macos-14]
     steps:
       - uses: actions/checkout@v7
 
@@ -265,8 +265,8 @@ jobs:
   all-bash:
     name: A 层全量 ./all.bash
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    # 与上面 host job 同一个理由：A 层基线（377 ok / 0 FAIL）是在 24.04 上量的，写死版本
-    runs-on: ubuntu-24.04
+    # 与上面 host job 同一个理由（⑩.3，2026-10-11 升 26.04）：写死版本、换 OS 必重量基线
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
@@ -274,6 +274,12 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: false
+      - name: 宿主身份
+        run: |
+          echo "=== os-release ==="; cat /etc/os-release
+          echo "=== uname ==="; uname -a
+          echo "=== cc ==="; cc --version | head -1
+          echo "=== bootstrap go ==="; go version
       - name: ./all.bash
         run: |
           cd src

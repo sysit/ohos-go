@@ -373,8 +373,9 @@ link: cannot handle R_AMD64_TLS_GD (sym net.SplitHostPort) when linking internal
 > 「`sh` 域观测不可信」是同一类错误的另一个面。
 
 **⚠️ CI 环境漂移预警（2026-09-23 记，尚未发生）。** `ubuntu-latest` 从 **2026-10-19**
-起迁到 Ubuntu 26。上面那条基线（377 ok / 0 FAIL）是在 24.04 上量的，漂移后
-**红的可能是宿主而不是代码**，且没有任何东西提醒你宿主换了。已处置两块：
+起迁到 Ubuntu 26。上面那条基线（377 ok / 0 FAIL）是在 **238（Debian 13）**上量的，
+CI 的 ubuntu runner 用的是 24.04（两者同为现代 glibc 系，数字作为期望值挪用）；
+runner OS 一旦漂移，**红的可能是宿主而不是代码**，且没有任何东西提醒你宿主换了。已处置两块：
 
 - 矩阵里 ubuntu 一格**写死 `ubuntu-24.04`**（与 `macos-14` 对称），夜间 `all-bash`
   那一格原先漏成 `ubuntu-latest`、2026-10-06 一并写死，把这次切换
@@ -531,9 +532,11 @@ B 层抓到 **7c**（包装嵌构建机绝对路径 → 12 个包假红），C �
    要补就装个 commandline-tools 到 238；不补也不算盲区，因为 amd64 的构建路径与宿主无关。
 
 3. **宿主基线要在 2026-10-19 之后重认一次。** `ubuntu-latest` 从那天起迁到 Ubuntu 26，
-   而 A 层基线（377 ok / 0 FAIL）是在 24.04 上量的。CI 里两格 runner 已**写死版本**
-   （`ubuntu-24.04` / `macos-14`），所以漂移不会突然把 CI 弄红 —— 它会**安静地不生效**：
-   写死的版本迟早被 GitHub 下线。届时改那一行 + **重量 A 层基线**，别只改版本号就完事。
+   而 A 层基线（377 ok / 0 FAIL）是在 **238（Debian 13）**上量的；CI 的 ubuntu runner
+   写死的是 `ubuntu-24.04`。CI 里两格 runner 已**写死版本**（`ubuntu-24.04` / `macos-14`），
+   所以漂移不会突然把 CI 弄红 —— 它会**安静地不生效**：写死的版本迟早被 GitHub 下线。
+   届时改那一行 + **重量 A 层基线**（在新 runner OS 上全量跑一遍、重新记数——
+   「377」这个值从没在 Ubuntu runner 上量过，本就只有 238 那台给过），别只改版本号就完事。
    期间新增的「宿主身份」步骤（`/etc/os-release` + `uname -a` + `cc --version` + `go version`）
    是唯一能事后回答「当时是哪台机器」的东西。
 
