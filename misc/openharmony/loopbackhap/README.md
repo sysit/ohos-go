@@ -87,9 +87,21 @@ LoopProbe  === LoopProbe DONE ===
   `hdc shell hilog | grep avc` 一起留下来再判断。
 - **B 失败但 A 通过**（只 IPv6 环回不行）→ 记成独立一条，不影响 A/D 的结论。
 
-**确认跑在应用域里**：`hdc shell "ps -ef | grep ohosloop"` 应显示 `u:r:app:s0` 与
-`200200xx` 段的 uid（本机实测 `20020077`）。若显示的是 `2000(shell)`，那是启动方式错了，
+**确认跑在应用域里**：`hdc shell "ps -ef | grep ohosloop"` 应显示 `200200xx` 段的 uid
+（6.1 上实测 `20020077`，7.0 上 `20020075`）。若显示的是 `2000(shell)`，那是启动方式错了，
 探针结果不成立。
+
+SELinux 域在 **HarmonyOS 7.0 变了**：`ps -ef` 不再打印域，要读
+`hdc shell "cat /proc/<pid>/attr/current"` —— 6.1 是 `u:r:app:s0`，**7.0 的调试 HAP 是
+`o:r:debug_hap:s0`**（`o:` 前缀、`debug_hap` 域）。两者都是应用域、都不是 `sh` 域，
+结论一样；**别拿 `u:r:app:s0` 当 7.0 上的判据，会误判成「启动方式错了」**。
+
+## 实测结果（2026-11-12，HarmonyOS 7.0 模拟器 `127.0.0.1:5557`）
+
+`go1.27.4-ohos` 上 A–E 全 OK，与下面 2026-09-22 那轮逐条一致；CertProbe 同样全绿
+（B 可读、C 191450 B 真 PEM、SC 非软链、F 仍 EACCES）。唯一差异是 SELinux 域变成
+`o:r:debug_hap:s0`（见上）。完整输出存
+`ohos-test-results/merge-1274-ohos7/capabilities.md`。
 
 ## 实测结果（2026-09-22，模拟器 `127.0.0.1:5555`）
 

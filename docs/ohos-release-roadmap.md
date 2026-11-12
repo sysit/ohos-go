@@ -59,6 +59,12 @@ native 载体（HAP + Go c-shared `.so` + N-API 胶水）—— 那是另一摊�
 已回写：`ohos-release-notes-v1.27.1-beta1.md`（能力表两行 + 已知问题 2 重写 + 与上一代差异）、
 `ohos-full-test-plan.md`（§5.3 收口段 + 四处引用）、`loopbackhap/README.md`。
 
+**2026-11-12 在 HarmonyOS 7.0 模拟器（`127.0.0.1:5557`，API 26）上随 `go1.27.4-ohos`
+复验：A~E 与 A~F 探针逐条同结论**，环回类仍是 `sh` 域限制、系统根仍可读、
+`user_cacerts` 仍 EACCES。唯一差异是调试 HAP 的 SELinux 域从 `u:r:app:s0` 变成
+`o:r:debug_hap:s0`（7.0 策略变化，uid 段仍 `200200xx`）—— README 的判据已随之修正，否则
+7.0 上会把它误判成「启动方式错了」。证据 `ohos-test-results/merge-1274-ohos7/capabilities.md`。
+
 ---
 
 ## ② A 层 `./all.bash` 重跑 ✅ 已跑完（2026-09-22）
@@ -383,8 +389,11 @@ runner OS 一旦漂移，**红的可能是宿主而不是代码**，且没有任
 - 加了一步「宿主身份」，把 `os-release` / `uname` / `cc` / bootstrap 版本打进日志 ——
   固定标签的镜像**本身也会按月更新**，这步是唯一能事后回答「当时是哪台机器」的东西。
 
-**2026-10-19 之后要做的**：显式升到 `ubuntu-26.04`，在新宿主上量一次 A 层基线，
-再改期望值。在那之前「双宿主绿」指的就是 24.04 这一格。
+**✅ 已处置（2026-10-11，提前于 10-19）**：两格 runner 显式升到 `ubuntu-26.04`
+（提交 `df97b73624`），当晚在新宿主上重量了 A 层基线——**Ubuntu 26.04.1 runner、
+go1.27.2-ohos 树：主包段 379 ok / 0 FAIL，全量 ALL TESTS PASSED（24.6 分钟，
+run `38116617628`）**。「379 vs 377」的 +2 是两次量点间上游新增了带测试的包，0 FAIL 是闸门。
+此后「双宿主绿」指 26.04 + macos-14。
 
 ---
 
@@ -531,14 +540,15 @@ B 层抓到 **7c**（包装嵌构建机绝对路径 → 12 个包假红），C �
    amd64 报错正确」，**amd64 的真产物形状在 Linux 侧一次都没验过**（只在 macOS 上验过）。
    要补就装个 commandline-tools 到 238；不补也不算盲区，因为 amd64 的构建路径与宿主无关。
 
-3. **宿主基线要在 2026-10-19 之后重认一次。** `ubuntu-latest` 从那天起迁到 Ubuntu 26，
-   而 A 层基线（377 ok / 0 FAIL）是在 **238（Debian 13）**上量的；CI 的 ubuntu runner
-   写死的是 `ubuntu-24.04`。CI 里两格 runner 已**写死版本**（`ubuntu-24.04` / `macos-14`），
-   所以漂移不会突然把 CI 弄红 —— 它会**安静地不生效**：写死的版本迟早被 GitHub 下线。
-   届时改那一行 + **重量 A 层基线**（在新 runner OS 上全量跑一遍、重新记数——
-   「377」这个值从没在 Ubuntu runner 上量过，本就只有 238 那台给过），别只改版本号就完事。
-   期间新增的「宿主身份」步骤（`/etc/os-release` + `uname -a` + `cc --version` + `go version`）
-   是唯一能事后回答「当时是哪台机器」的东西。
+3. **~~宿主基线要在 2026-10-19 之后重认一次。~~ ✅ 已提前闭环（2026-10-11）。**
+   `ubuntu-latest` 从 2026-10-19 起迁 Ubuntu 26，而旧 A 层基线（377 ok / 0 FAIL）是在
+   **238（Debian 13）**上量的。CI 里两格 runner 先**写死版本**（host 矩阵随 beta2、
+   夜间 all-bash 于 2026-10-06），再于 2026-10-11 显式升 `ubuntu-26.04` 并重量基线：
+   **26.04.1 runner、go1.27.2-ohos 树 = 379 ok / 0 FAIL / ALL TESTS PASSED（24.6 分钟，
+   run `38116617628`）**。同日给夜间 job 补上了「宿主身份」步骤
+   （`/etc/os-release` + `uname -a` + `cc --version` + `go version`）——
+   量基线的 job 此前反而没有它。**下次再换 runner OS 时照此办：改版本 + 重量基线 + 补宿主身份，
+   别只改版本号就完事。**
 
 4. **~~C 层还没在交付物上重跑过~~ 已闭环（2026-09-24），并当场抓到第二个交付物专属缺陷。**
    驱动 `ohos-test-results/c-layer-release-tree-v1.27.1-ohos/driver.sh`，
